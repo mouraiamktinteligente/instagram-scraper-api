@@ -210,90 +210,161 @@ class InstagramService {
         const page = await context.newPage();
 
         try {
-            logger.info(`Performing login for ${account.username}`);
+            logger.info(`[LOGIN] Starting login for ${account.username}`);
 
-            // Navigate to login page
+            // Step 1: Navigate to login page
+            logger.info('[LOGIN] Step 1: Navigating to login page...');
             await page.goto('https://www.instagram.com/accounts/login/', {
                 waitUntil: 'networkidle',
                 timeout: 60000
             });
+            logger.info('[LOGIN] Step 1: Login page loaded');
 
             await randomDelay(2000, 4000);
 
-            // Handle cookie consent if present
+            // Step 2: Handle cookie consent if present
+            logger.info('[LOGIN] Step 2: Checking for cookie consent...');
             try {
-                const cookieButton = await page.$('button:has-text("Allow all cookies")');
-                if (cookieButton) {
-                    await cookieButton.click();
-                    await randomDelay(1000, 2000);
+                const cookieButtons = [
+                    'button:has-text("Allow all cookies")',
+                    'button:has-text("Permitir todos os cookies")',
+                    'button:has-text("Accept All")',
+                    'button:has-text("Aceitar")'
+                ];
+                for (const selector of cookieButtons) {
+                    const btn = await page.$(selector);
+                    if (btn) {
+                        await btn.click();
+                        logger.info('[LOGIN] Step 2: Cookie consent clicked');
+                        await randomDelay(1000, 2000);
+                        break;
+                    }
                 }
-            } catch (e) { /* ignore */ }
+            } catch (e) {
+                logger.debug('[LOGIN] Step 2: No cookie consent found');
+            }
 
-            // Wait for and fill username
-            await page.waitForSelector('input[name="username"]', { timeout: 10000 });
+            // Step 3: Wait for and fill username
+            logger.info('[LOGIN] Step 3: Waiting for username field...');
+            await page.waitForSelector('input[name="username"]', { timeout: 15000 });
             await page.fill('input[name="username"]', account.username);
+            logger.info('[LOGIN] Step 3: Username filled');
             await randomDelay(500, 1000);
 
-            // Fill password
+            // Step 4: Fill password
+            logger.info('[LOGIN] Step 4: Filling password...');
             await page.fill('input[name="password"]', account.password);
+            logger.info('[LOGIN] Step 4: Password filled');
             await randomDelay(500, 1000);
 
-            // Click login button
+            // Step 5: Click login button
+            logger.info('[LOGIN] Step 5: Clicking login button...');
             await page.click('button[type="submit"]');
+            logger.info('[LOGIN] Step 5: Login button clicked, waiting for response...');
 
-            // Wait for navigation or error
-            await Promise.race([
-                page.waitForURL('**/instagram.com/**', { timeout: 30000 }),
-                page.waitForSelector('p[data-testid="login-error-message"]', { timeout: 30000 }).catch(() => null)
-            ]);
+            // Step 6: Wait for navigation or error
+            await randomDelay(5000, 8000);
 
-            await randomDelay(3000, 5000);
+            const currentUrl = page.url();
+            logger.info(`[LOGIN] Step 6: Current URL after login attempt: ${currentUrl}`);
 
-            // Check for login error
+            // Step 7: Check for various states
+            // Check for login error message
             const errorMessage = await page.$('p[data-testid="login-error-message"]');
             if (errorMessage) {
                 const errorText = await errorMessage.textContent();
-                logger.error(`Login failed for ${account.username}: ${errorText}`);
+                logger.error(`[LOGIN] Error message found: ${errorText}`);
                 await page.close();
                 return false;
             }
 
+            // Check for checkpoint/challenge
+            if (currentUrl.includes('challenge') || currentUrl.includes('checkpoint')) {
+                logger.error('[LOGIN] Instagram requires verification (challenge/checkpoint)');
+                logger.error('[LOGIN] Please verify the account manually first');
+                await page.close();
+                return false;
+            }
+
+            // Check for suspicious login activity
+            const suspiciousLogin = await page.$('text=Suspicious Login Attempt');
+            if (suspiciousLogin) {
+                logger.error('[LOGIN] Suspicious login attempt detected');
+                await page.close();
+                return false;
+            }
+
+            // Check if still on login page
+            if (currentUrl.includes('/accounts/login')) {
+                logger.warn('[LOGIN] Still on login page, checking for errors...');
+
+                // Try to get any visible error text
+                const pageContent = await page.content();
+                if (pageContent.includes('Sorry, your password was incorrect')) {
+                    logger.error('[LOGIN] Password incorrect');
+                } else if (pageContent.includes('Please wait a few minutes')) {
+                    logger.error('[LOGIN] Rate limited - too many attempts');
+                } else {
+                    logger.error('[LOGIN] Unknown error - still on login page');
+                }
+                await page.close();
+                return false;
+            }
+
+            // Step 8: Handle post-login popups
+            logger.info('[LOGIN] Step 8: Handling post-login popups...');
+            await randomDelay(2000, 3000);
+
             // Handle "Save Login Info" popup
             try {
-                const saveInfoButton = await page.$('button:has-text("Not Now")');
-                if (saveInfoButton) {
-                    await saveInfoButton.click();
-                    await randomDelay(1000, 2000);
+                const notNowButtons = await page.$$('button:has-text("Not Now")');
+                for (const btn of notNowButtons) {
+                    try {
+                        await btn.click();
+                        logger.info('[LOGIN] Clicked "Not Now" popup');
+                        await randomDelay(1000, 2000);
+                    } catch (e) { /* button might not be clickable */ }
                 }
             } catch (e) { /* ignore */ }
 
             // Handle notifications popup
             try {
-                const notNowButton = await page.$('button:has-text("Not Now")');
-                if (notNowButton) {
-                    await notNowButton.click();
+                const turnOnBtn = await page.$('button:has-text("Turn On")');
+                const notNowBtn = await page.$('button:has-text("Not Now")');
+                if (notNowBtn) {
+                    await notNowBtn.click();
+                    logger.info('[LOGIN] Dismissed notifications popup');
                     await randomDelay(1000, 2000);
                 }
             } catch (e) { /* ignore */ }
 
-            // Verify login succeeded
+            // Step 9: Verify login succeeded
+            logger.info('[LOGIN] Step 9: Verifying login success...');
             const isLoggedIn = await this.checkLoggedIn(page);
 
             if (isLoggedIn) {
                 // Save session cookies
                 const cookies = await context.cookies();
                 accountPool.saveSession(account.username, cookies);
-                logger.info(`Login successful for ${account.username}`);
+                logger.info(`[LOGIN] ✅ Login successful for ${account.username}`);
                 await page.close();
                 return true;
             }
 
-            logger.error(`Login verification failed for ${account.username}`);
+            logger.error(`[LOGIN] ❌ Login verification failed for ${account.username}`);
+            logger.error(`[LOGIN] Final URL: ${page.url()}`);
             await page.close();
             return false;
 
         } catch (error) {
-            logger.error(`Login error for ${account.username}:`, error.message);
+            logger.error(`[LOGIN] ❌ Exception during login for ${account.username}: ${error.message}`);
+
+            // Try to capture current state
+            try {
+                const url = page.url();
+                logger.error(`[LOGIN] URL at error: ${url}`);
+            } catch (e) { /* ignore */ }
+
             try { await page.close(); } catch (e) { /* ignore */ }
             return false;
         }
