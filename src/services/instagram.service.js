@@ -222,26 +222,82 @@ class InstagramService {
 
             await randomDelay(2000, 4000);
 
-            // Step 2: Handle cookie consent if present
-            logger.info('[LOGIN] Step 2: Checking for cookie consent...');
+            // Step 2: Handle cookie consent modal - REQUIRED before login form appears
+            logger.info('[LOGIN] Step 2: Handling cookie consent...');
             try {
-                const cookieButtons = [
+                // Wait a bit for cookie dialog to appear
+                await randomDelay(1000, 2000);
+
+                // Multiple possible selectors for cookie consent
+                const cookieSelectors = [
+                    // English variants
                     'button:has-text("Allow all cookies")',
-                    'button:has-text("Permitir todos os cookies")',
+                    'button:has-text("Allow essential and optional cookies")',
                     'button:has-text("Accept All")',
-                    'button:has-text("Aceitar")'
+                    'button:has-text("Accept")',
+                    'button:has-text("Only allow essential cookies")',
+                    // Portuguese variants
+                    'button:has-text("Permitir todos os cookies")',
+                    'button:has-text("Permitir cookies essenciais e opcionais")',
+                    'button:has-text("Aceitar tudo")',
+                    'button:has-text("Aceitar")',
+                    'button:has-text("Permitir somente cookies essenciais")',
+                    // Generic patterns
+                    '[role="dialog"] button:first-of-type',
+                    'div[role="dialog"] button',
+                    'button._a9--._a9_1',
                 ];
-                for (const selector of cookieButtons) {
-                    const btn = await page.$(selector);
-                    if (btn) {
-                        await btn.click();
-                        logger.info('[LOGIN] Step 2: Cookie consent clicked');
-                        await randomDelay(1000, 2000);
-                        break;
+
+                let clicked = false;
+                for (const selector of cookieSelectors) {
+                    try {
+                        const btn = await page.$(selector);
+                        if (btn) {
+                            const isVisible = await btn.isVisible();
+                            if (isVisible) {
+                                await btn.click();
+                                logger.info(`[LOGIN] Step 2: Cookie consent clicked (${selector})`);
+                                clicked = true;
+                                await randomDelay(2000, 3000);
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        // Try next selector
                     }
                 }
+
+                if (!clicked) {
+                    // Try clicking any visible button in a dialog
+                    const dialogButtons = await page.$$('[role="dialog"] button, [role="presentation"] button');
+                    for (const btn of dialogButtons) {
+                        try {
+                            const isVisible = await btn.isVisible();
+                            if (isVisible) {
+                                const text = await btn.textContent();
+                                logger.info(`[LOGIN] Step 2: Found dialog button with text: "${text}"`);
+                                if (text && (text.toLowerCase().includes('allow') ||
+                                    text.toLowerCase().includes('accept') ||
+                                    text.toLowerCase().includes('permitir') ||
+                                    text.toLowerCase().includes('aceitar'))) {
+                                    await btn.click();
+                                    logger.info('[LOGIN] Step 2: Clicked cookie button by text match');
+                                    clicked = true;
+                                    await randomDelay(2000, 3000);
+                                    break;
+                                }
+                            }
+                        } catch (e) {
+                            continue;
+                        }
+                    }
+                }
+
+                if (!clicked) {
+                    logger.warn('[LOGIN] Step 2: No cookie consent button found - continuing anyway');
+                }
             } catch (e) {
-                logger.debug('[LOGIN] Step 2: No cookie consent found');
+                logger.warn('[LOGIN] Step 2: Cookie consent handling error:', e.message);
             }
 
             // Step 3: Wait for and fill username
