@@ -32,7 +32,8 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production
+# Use npm install as fallback if package-lock.json doesn't exist or is incompatible
+RUN npm install --omit=dev
 
 # Install Playwright Chromium
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
