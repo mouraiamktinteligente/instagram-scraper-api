@@ -212,15 +212,32 @@ class InstagramService {
         try {
             logger.info(`[LOGIN] Starting login for ${account.username}`);
 
-            // Step 1: Navigate to login page
+            // Step 1: Navigate to login page and wait for React to render
             logger.info('[LOGIN] Step 1: Navigating to login page...');
             await page.goto('https://www.instagram.com/accounts/login/', {
-                waitUntil: 'networkidle',
+                waitUntil: 'domcontentloaded',
                 timeout: 60000
             });
+
+            // Wait for JavaScript to fully execute (Instagram is a React SPA)
+            logger.info('[LOGIN] Step 1: Waiting for JavaScript to render...');
+            try {
+                // Wait for any input or button to appear (React hydration)
+                await page.waitForFunction(() => {
+                    return document.querySelectorAll('input').length > 0 ||
+                        document.querySelectorAll('button').length > 0 ||
+                        document.body.innerText.length > 100;
+                }, { timeout: 30000 });
+                logger.info('[LOGIN] Step 1: JavaScript rendered content');
+            } catch (e) {
+                logger.warn('[LOGIN] Step 1: Timeout waiting for JS render, continuing...');
+            }
+
+            // Additional wait for full page load
+            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
             logger.info('[LOGIN] Step 1: Login page loaded');
 
-            await randomDelay(2000, 4000);
+            await randomDelay(3000, 5000);  // Longer delay to let React fully hydrate
 
             // Step 2: Handle cookie consent modal - REQUIRED before login form appears
             logger.info('[LOGIN] Step 2: Handling cookie consent...');
@@ -543,16 +560,39 @@ class InstagramService {
             hasTouch: false,
             extraHTTPHeaders: getBrowserHeaders(),
             colorScheme: 'light',
+            javaScriptEnabled: true,
+            bypassCSP: true,
         });
 
-        // Add stealth scripts
+        // Enhanced stealth scripts to avoid detection
         await context.addInitScript(() => {
             // Remove webdriver property
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            delete navigator.__proto__.webdriver;
 
-            // Add plugins
+            // Add realistic plugins array
             Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
+                get: () => {
+                    const plugins = [
+                        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                    ];
+                    plugins.length = 3;
+                    return plugins;
+                },
+            });
+
+            // Add realistic mimeTypes
+            Object.defineProperty(navigator, 'mimeTypes', {
+                get: () => {
+                    const mimeTypes = [
+                        { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                        { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                    ];
+                    mimeTypes.length = 2;
+                    return mimeTypes;
+                },
             });
 
             // Add languages
@@ -560,12 +600,66 @@ class InstagramService {
                 get: () => ['pt-BR', 'pt', 'en-US', 'en'],
             });
 
-            // Override permissions
+            // Add platform
+            Object.defineProperty(navigator, 'platform', {
+                get: () => 'Win32',
+            });
+
+            // Add deviceMemory
+            Object.defineProperty(navigator, 'deviceMemory', {
+                get: () => 8,
+            });
+
+            // Add hardwareConcurrency
+            Object.defineProperty(navigator, 'hardwareConcurrency', {
+                get: () => 8,
+            });
+
+            // Fix permissions
             const originalQuery = window.navigator.permissions.query;
             window.navigator.permissions.query = (parameters) =>
                 parameters.name === 'notifications'
                     ? Promise.resolve({ state: 'denied' })
                     : originalQuery(parameters);
+
+            // Add chrome object (important for detection)
+            window.chrome = {
+                runtime: {},
+                loadTimes: function () { },
+                csi: function () { },
+                app: {}
+            };
+
+            // Fix iframe contentWindow access
+            const originalIframeContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+                get: function () {
+                    return originalIframeContentWindow.get.call(this);
+                }
+            });
+
+            // Add WebGL vendor and renderer
+            const getParameterProxyHandler = {
+                apply: function (target, thisArg, args) {
+                    const param = args[0];
+                    const gl = thisArg;
+                    // UNMASKED_VENDOR_WEBGL
+                    if (param === 37445) return 'Google Inc. (NVIDIA)';
+                    // UNMASKED_RENDERER_WEBGL
+                    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                    return target.apply(thisArg, args);
+                }
+            };
+
+            try {
+                const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
+            } catch (e) { }
+
+            try {
+                const originalGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = new Proxy(originalGetParameter2, getParameterProxyHandler);
+            } catch (e) { }
         });
 
         return context;
