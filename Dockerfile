@@ -35,13 +35,12 @@ COPY package*.json ./
 # Use npm install as fallback if package-lock.json doesn't exist or is incompatible
 RUN npm install --omit=dev
 
-# Install Playwright Chromium
-ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
-RUN npx playwright install chromium
-RUN npx playwright install-deps chromium
-
-# Copy application code
+# Copy application code first (before playwright install)
 COPY . .
+
+# Install Playwright Chromium to default system path
+# Using the default cache path ensures runtime can find the browser
+RUN npx playwright install chromium --with-deps
 
 # Make start script executable
 RUN chmod +x start.sh
