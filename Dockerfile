@@ -2,12 +2,19 @@ FROM mcr.microsoft.com/playwright:v1.40.1-jammy
 
 WORKDIR /app
 
+# Set Playwright browser path BEFORE any npm install
+# This ensures browsers are downloaded to the correct location
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Copy package files first (better caching)
 COPY package*.json ./
 
 # Install dependencies
-# Use npm install as fallback if package-lock.json doesn't exist or is incompatible
 RUN npm install --omit=dev
+
+# Verify Playwright browsers are available (they come pre-installed in this image)
+# If not found, install them
+RUN npx playwright install chromium || true
 
 # Copy application code
 COPY . .
@@ -21,8 +28,6 @@ RUN mkdir -p logs
 # Set environment
 ENV NODE_ENV=production
 ENV PORT=3000
-# Playwright browsers are installed at /ms-playwright in the official image
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Expose port
 EXPOSE 3000
