@@ -175,8 +175,6 @@ class InstagramService {
             deviceScaleFactor: 1,
             hasTouch: false,
             extraHTTPHeaders: getBrowserHeaders(),
-            permissions: [],
-            geolocation: null,
             colorScheme: 'light',
         });
 

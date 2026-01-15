@@ -44,15 +44,16 @@ class DocIdService {
         }
 
         try {
-            // Fetch from database
+            // Fetch from database - use maybeSingle() to handle 0 rows gracefully
             const { data, error } = await supabase
                 .from('instagram_config')
                 .select('doc_id_comments, last_updated, is_valid')
                 .eq('id', 1)
-                .single();
+                .maybeSingle();
 
+            // Only log real errors, not "no rows found"
             if (error) {
-                logger.error('Error fetching doc_id from database:', error);
+                logger.warn('Error fetching doc_id from database:', error.message);
                 return this.cachedDocId; // Return cached if available
             }
 
@@ -63,8 +64,13 @@ class DocIdService {
                 return this.cachedDocId;
             }
 
-            // Need to discover new doc_id
-            logger.warn('No valid doc_id in database, starting discovery...');
+            // No data yet - this is normal for first run
+            if (!data) {
+                logger.info('No doc_id config found in database (first run)');
+            } else {
+                logger.warn('Doc_id is invalid or missing, discovery needed...');
+            }
+
             return await this.discoverDocId();
 
         } catch (error) {
