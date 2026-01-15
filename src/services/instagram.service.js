@@ -245,16 +245,32 @@ class InstagramService {
         page.on('response', async (response) => {
             const url = response.url();
 
-            // Check for GraphQL endpoints that might contain comments
-            if (url.includes('/graphql') || url.includes('/api/v1/media')) {
+            // Check for GraphQL/API endpoints that might contain comments
+            const isLikelyCommentsApi =
+                url.includes('/graphql') ||
+                url.includes('/api/graphql') ||
+                url.includes('/graphql/query') ||
+                url.includes('/api/v1/media') ||
+                url.includes('/comments');
+
+            if (isLikelyCommentsApi) {
                 try {
-                    const contentType = response.headers()['content-type'] || '';
-                    if (!contentType.includes('application/json')) return;
+                    // Relaxed content-type check
+                    const ct = (response.headers()['content-type'] || '').toLowerCase();
+                    if (!(ct.includes('json') || url.includes('graphql'))) return;
+
+                    // Log for debugging
+                    logger.debug('Intercepted API response', { url: url.substring(0, 100) });
 
                     const data = await response.json();
 
                     // Extract comments from various response structures
                     const extractedComments = this.extractCommentsFromResponse(data, postId, postUrl);
+
+                    if (extractedComments.length > 0) {
+                        logger.debug(`Extracted ${extractedComments.length} comments from response`);
+                    }
+
                     comments.push(...extractedComments);
 
                 } catch (e) {
@@ -275,28 +291,51 @@ class InstagramService {
         const comments = [];
 
         try {
-            // Handle different response structures
+            // Handle different response structures - Instagram changes these frequently
             const paths = [
-                // GraphQL query response
+                // GraphQL query response (classic)
                 data?.data?.shortcode_media?.edge_media_to_parent_comment?.edges,
                 data?.data?.shortcode_media?.edge_media_to_comment?.edges,
-                // API response
-                data?.comments,
-                data?.edges,
-                // Nested structures
+
+                // XDT structures (newer)
                 data?.data?.xdt_shortcode_media?.edge_media_to_parent_comment?.edges,
+                data?.data?.xdt_shortcode_media?.edge_media_to_comment?.edges,
+
+                // API v1 connection structures (very common now)
+                data?.data?.xdt_api__v1__media__comments__connection_v2?.edges,
+                data?.data?.xdt_api__v1__media__comments__connection?.edges,
+                data?.data?.xdt_api__v1__media__comments__threaded__connection?.edges,
+
+                // Direct API responses
+                data?.comments,
+                data?.comment_list,
+                data?.edges,
+
+                // Sometimes nested under "data" directly
+                data?.data?.comments,
+                data?.data?.edges,
             ];
 
             for (const edges of paths) {
                 if (Array.isArray(edges)) {
                     for (const edge of edges) {
                         const node = edge.node || edge;
+
+                        // Ensure we have a comment_id (support pk as fallback)
+                        if (!node.id && !node.pk && !node.comment_id) continue;
+
                         const comment = parseComment(node, postId, postUrl);
                         if (comment && comment.comment_id) {
                             comments.push(comment);
 
-                            // Also extract reply comments
-                            const replies = node.edge_threaded_comments?.edges || node.replies?.edges || [];
+                            // Also extract reply comments from various structures
+                            const replies =
+                                node.edge_threaded_comments?.edges ||
+                                node.replies?.edges ||
+                                node.preview_child_comments ||
+                                node.child_comments ||
+                                [];
+
                             for (const reply of replies) {
                                 const replyNode = reply.node || reply;
                                 const replyComment = parseComment(replyNode, postId, postUrl);

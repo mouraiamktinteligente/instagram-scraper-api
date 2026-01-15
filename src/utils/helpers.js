@@ -100,20 +100,37 @@ function normalizeInstagramUrl(url) {
  */
 function parseComment(node, postId, postUrl) {
     try {
-        const owner = node.owner || {};
+        // Support both 'owner' and 'user' object structures
+        const owner = node.owner || node.user || {};
+
+        // Get comment ID with multiple fallbacks
+        const commentId = node.id || node.pk || node.comment_id || node.node_id;
+        if (!commentId) return null;
+
+        // Parse created_at timestamp (can be seconds or already ISO string)
+        let createdAt;
+        if (node.created_at) {
+            if (typeof node.created_at === 'number') {
+                createdAt = new Date(node.created_at * 1000).toISOString();
+            } else {
+                createdAt = node.created_at;
+            }
+        } else if (node.created_time) {
+            createdAt = new Date(node.created_time * 1000).toISOString();
+        } else {
+            createdAt = new Date().toISOString();
+        }
 
         return {
             post_id: postId,
             post_url: postUrl,
-            comment_id: node.id || node.pk,
-            text: node.text || '',
-            created_at: node.created_at
-                ? new Date(node.created_at * 1000).toISOString()
-                : new Date().toISOString(),
-            username: owner.username || '',
-            user_id: owner.id || owner.pk || '',
-            profile_pic_url: owner.profile_pic_url || '',
-            like_count: node.edge_liked_by?.count || node.like_count || 0,
+            comment_id: String(commentId),
+            text: node.text || node.comment_text || '',
+            created_at: createdAt,
+            username: owner.username || node.username || '',
+            user_id: String(owner.id || owner.pk || node.user_id || ''),
+            profile_pic_url: owner.profile_pic_url || node.profile_pic_url || '',
+            like_count: node.edge_liked_by?.count || node.like_count || node.comment_like_count || 0,
         };
     } catch (error) {
         return null;
