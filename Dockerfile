@@ -21,6 +21,8 @@ RUN mkdir -p logs
 # Set environment
 ENV NODE_ENV=production
 ENV PORT=3000
+# Playwright browsers are installed at /ms-playwright in the official image
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Expose port
 EXPOSE 3000
