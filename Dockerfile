@@ -2,8 +2,7 @@ FROM mcr.microsoft.com/playwright:v1.40.1-jammy
 
 WORKDIR /app
 
-# Set Playwright browser path BEFORE any npm install
-# This ensures browsers are downloaded to the correct location
+# Set Playwright browser path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Copy package files first (better caching)
@@ -12,19 +11,14 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install --omit=dev
 
-# Ensure the browser directory exists and install Chromium with all dependencies
-# Remove || true to fail loudly if installation fails
-RUN mkdir -p /ms-playwright
-RUN npx playwright install --with-deps chromium
-
 # Copy application code
 COPY . .
 
 # Make start script executable
 RUN chmod +x start.sh
 
-# Create logs directory
-RUN mkdir -p logs
+# Create directories for logs and sessions
+RUN mkdir -p logs /data/sessions
 
 # Set environment
 ENV NODE_ENV=production

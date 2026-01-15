@@ -1,141 +1,310 @@
 /**
  * Instagram Service
- * Main scraping logic using Playwright with stealth configuration
+ * Core scraping service using Playwright with multi-account login support
  */
 
 const { chromium } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
-const Bottleneck = require('bottleneck');
 const config = require('../config');
 const logger = require('../utils/logger');
+const accountPool = require('./accountPool.service');
 const {
-    randomDelay,
-    extractPostId,
-    normalizeInstagramUrl,
     parseComment,
     getRandomUserAgent,
     getBrowserHeaders,
-    retryWithBackoff,
+    randomDelay,
+    extractPostId,
 } = require('../utils/helpers');
-const docIdService = require('./docid.service');
 
-// Supabase client
+// Initialize Supabase client
 const supabase = createClient(config.supabase.url, config.supabase.key);
+
+// Initialize account pool
+accountPool.initialize();
 
 class InstagramService {
     constructor() {
-        // Rate limiter per instance
-        this.limiter = new Bottleneck({
-            minTime: Math.floor(60000 / config.rateLimit.requestsPerMinute),
-            maxConcurrent: 1,
-        });
-
-        this.activeBrowsers = new Set();
+        this.browser = null;
     }
 
     /**
      * Main method to scrape comments from an Instagram post
      * @param {string} postUrl - Instagram post URL
-     * @param {Object} proxy - Proxy configuration
-     * @param {string} jobId - Job ID for tracking
-     * @returns {Promise<Object>} Scraping result with comments
+     * @param {Object} proxy - Optional proxy configuration
+     * @returns {Promise<Object>} Scraping result
      */
-    async scrapeComments(postUrl, proxy, jobId) {
-        const startTime = Date.now();
-        const normalizedUrl = normalizeInstagramUrl(postUrl);
-        const postId = extractPostId(normalizedUrl);
-
+    async scrapeComments(postUrl, proxy = null) {
+        const postId = extractPostId(postUrl);
         if (!postId) {
-            throw new Error(`Invalid Instagram URL: ${postUrl}`);
+            throw new Error('Invalid Instagram post URL');
         }
 
-        logger.scrape('Starting comment scrape', { postUrl: normalizedUrl, postId, jobId });
+        logger.info('[SCRAPE] Starting comment scrape', { postId, postUrl });
 
         let browser = null;
+        let context = null;
         const comments = [];
 
         try {
-            // Launch browser with proxy
+            // Get next available account
+            const account = accountPool.getNextAccount();
+            if (!account) {
+                throw new Error('No Instagram accounts available. Configure INSTAGRAM_ACCOUNTS env variable.');
+            }
+
+            logger.info(`[SCRAPE] Using account: ${account.username}`);
+
+            // Launch browser
             browser = await this.launchBrowser(proxy);
-            this.activeBrowsers.add(browser);
 
-            const context = await this.createBrowserContext(browser);
+            // Create browser context
+            context = await this.createBrowserContext(browser);
+
+            // Try to load existing session or perform login
+            const loggedIn = await this.ensureLoggedIn(context, account);
+            if (!loggedIn) {
+                accountPool.reportError(account.username, 'Login failed');
+                throw new Error(`Failed to login with account ${account.username}`);
+            }
+
+            // Create page and setup interception
             const page = await context.newPage();
+            this.setupInterception(page, comments, postId, postUrl);
 
-            // Set up request/response interception
-            const interceptedComments = [];
-            this.setupInterception(page, interceptedComments, postId, normalizedUrl);
+            // Navigate to the post
+            await this.navigateToPost(page, postUrl);
 
-            // Navigate to post
-            await this.navigateToPost(page, normalizedUrl);
+            // Wait for comments to load
+            await this.waitForComments(page);
 
-            // Scroll and load comments
-            await this.loadAllComments(page);
+            // Scroll to load more comments
+            await this.scrollForMoreComments(page);
 
-            // Wait a bit for any pending responses
-            await randomDelay(2000, 3000);
+            // Fallback: Extract comments from DOM if interception didn't catch them
+            if (comments.length === 0) {
+                const domComments = await this.extractCommentsFromDOM(page, postId, postUrl);
+                comments.push(...domComments);
+            }
 
-            // Process intercepted comments
-            comments.push(...interceptedComments);
+            // Report success
+            accountPool.reportSuccess(account.username);
 
-            // Also try to extract comments from page content (fallback)
-            const pageComments = await this.extractCommentsFromPage(page, postId, normalizedUrl);
+            // Save comments to database
+            const savedCount = await this.saveComments(comments, postId);
 
-            // Merge and deduplicate
-            const commentMap = new Map();
-            [...comments, ...pageComments].forEach(comment => {
-                if (comment.comment_id && !commentMap.has(comment.comment_id)) {
-                    commentMap.set(comment.comment_id, comment);
-                }
-            });
-
-            const uniqueComments = Array.from(commentMap.values());
-
-            await browser.close();
-            this.activeBrowsers.delete(browser);
-
-            const duration = Date.now() - startTime;
-            logger.scrape('Scrape completed', {
+            logger.info('[SCRAPE] Scrape completed', {
                 postId,
-                commentsCount: uniqueComments.length,
-                duration: `${duration}ms`,
+                commentsFound: comments.length,
+                commentsSaved: savedCount
             });
 
             return {
                 success: true,
                 postId,
-                postUrl: normalizedUrl,
-                commentsCount: uniqueComments.length,
-                comments: uniqueComments,
-                duration,
+                postUrl,
+                commentsCount: comments.length,
+                savedCount,
+                account: account.username
             };
 
         } catch (error) {
             logger.error('Error scraping comments:', {
                 postUrl,
                 error: error.message,
-                stack: error.stack,
+                stack: error.stack
             });
-
-            if (browser) {
-                try {
-                    await browser.close();
-                    this.activeBrowsers.delete(browser);
-                } catch (e) {
-                    // Ignore close errors
-                }
-            }
-
             throw error;
+
+        } finally {
+            if (context) {
+                try { await context.close(); } catch (e) { /* ignore */ }
+            }
+            if (browser) {
+                try { await browser.close(); } catch (e) { /* ignore */ }
+            }
         }
     }
 
     /**
-     * Launch browser with stealth configuration
-     * @param {Object} proxy - Proxy configuration
+     * Ensure user is logged in, either by loading session or performing login
+     * @param {BrowserContext} context 
+     * @param {Object} account 
+     * @returns {Promise<boolean>}
+     */
+    async ensureLoggedIn(context, account) {
+        // Try to load existing session
+        const cookies = accountPool.loadSession(account.username);
+        if (cookies && cookies.length > 0) {
+            await context.addCookies(cookies);
+            logger.debug(`Loaded existing session for ${account.username}`);
+
+            // Verify session is still valid
+            const page = await context.newPage();
+            try {
+                await page.goto('https://www.instagram.com/', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 30000
+                });
+                await randomDelay(2000, 3000);
+
+                // Check if we're still logged in
+                const isLoggedIn = await this.checkLoggedIn(page);
+                await page.close();
+
+                if (isLoggedIn) {
+                    logger.info(`Session valid for ${account.username}`);
+                    return true;
+                }
+                logger.warn(`Session expired for ${account.username}, will re-login`);
+            } catch (error) {
+                logger.warn(`Error verifying session: ${error.message}`);
+                try { await page.close(); } catch (e) { /* ignore */ }
+            }
+        }
+
+        // Perform fresh login
+        return await this.performLogin(context, account);
+    }
+
+    /**
+     * Check if currently logged in
+     * @param {Page} page 
+     * @returns {Promise<boolean>}
+     */
+    async checkLoggedIn(page) {
+        try {
+            // Look for elements that only appear when logged in
+            const loggedInIndicators = [
+                'svg[aria-label="Home"]',
+                'svg[aria-label="Início"]',
+                'a[href="/direct/inbox/"]',
+                'span[aria-label="Profile"]'
+            ];
+
+            for (const selector of loggedInIndicators) {
+                const element = await page.$(selector);
+                if (element) return true;
+            }
+
+            // Check URL - if redirected to login, not logged in
+            const url = page.url();
+            if (url.includes('/accounts/login')) return false;
+
+            // Check for login form
+            const loginForm = await page.$('input[name="username"]');
+            if (loginForm) return false;
+
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Perform Instagram login
+     * @param {BrowserContext} context 
+     * @param {Object} account 
+     * @returns {Promise<boolean>}
+     */
+    async performLogin(context, account) {
+        const page = await context.newPage();
+
+        try {
+            logger.info(`Performing login for ${account.username}`);
+
+            // Navigate to login page
+            await page.goto('https://www.instagram.com/accounts/login/', {
+                waitUntil: 'networkidle',
+                timeout: 60000
+            });
+
+            await randomDelay(2000, 4000);
+
+            // Handle cookie consent if present
+            try {
+                const cookieButton = await page.$('button:has-text("Allow all cookies")');
+                if (cookieButton) {
+                    await cookieButton.click();
+                    await randomDelay(1000, 2000);
+                }
+            } catch (e) { /* ignore */ }
+
+            // Wait for and fill username
+            await page.waitForSelector('input[name="username"]', { timeout: 10000 });
+            await page.fill('input[name="username"]', account.username);
+            await randomDelay(500, 1000);
+
+            // Fill password
+            await page.fill('input[name="password"]', account.password);
+            await randomDelay(500, 1000);
+
+            // Click login button
+            await page.click('button[type="submit"]');
+
+            // Wait for navigation or error
+            await Promise.race([
+                page.waitForURL('**/instagram.com/**', { timeout: 30000 }),
+                page.waitForSelector('p[data-testid="login-error-message"]', { timeout: 30000 }).catch(() => null)
+            ]);
+
+            await randomDelay(3000, 5000);
+
+            // Check for login error
+            const errorMessage = await page.$('p[data-testid="login-error-message"]');
+            if (errorMessage) {
+                const errorText = await errorMessage.textContent();
+                logger.error(`Login failed for ${account.username}: ${errorText}`);
+                await page.close();
+                return false;
+            }
+
+            // Handle "Save Login Info" popup
+            try {
+                const saveInfoButton = await page.$('button:has-text("Not Now")');
+                if (saveInfoButton) {
+                    await saveInfoButton.click();
+                    await randomDelay(1000, 2000);
+                }
+            } catch (e) { /* ignore */ }
+
+            // Handle notifications popup
+            try {
+                const notNowButton = await page.$('button:has-text("Not Now")');
+                if (notNowButton) {
+                    await notNowButton.click();
+                    await randomDelay(1000, 2000);
+                }
+            } catch (e) { /* ignore */ }
+
+            // Verify login succeeded
+            const isLoggedIn = await this.checkLoggedIn(page);
+
+            if (isLoggedIn) {
+                // Save session cookies
+                const cookies = await context.cookies();
+                accountPool.saveSession(account.username, cookies);
+                logger.info(`Login successful for ${account.username}`);
+                await page.close();
+                return true;
+            }
+
+            logger.error(`Login verification failed for ${account.username}`);
+            await page.close();
+            return false;
+
+        } catch (error) {
+            logger.error(`Login error for ${account.username}:`, error.message);
+            try { await page.close(); } catch (e) { /* ignore */ }
+            return false;
+        }
+    }
+
+    /**
+     * Launch Playwright browser
+     * @param {Object} proxy - Optional proxy configuration
      * @returns {Promise<Browser>}
      */
-    async launchBrowser(proxy) {
+    async launchBrowser(proxy = null) {
         const launchOptions = {
             headless: true,
             args: [
@@ -145,7 +314,6 @@ class InstagramService {
                 '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
                 '--window-size=1920,1080',
-                '--disable-blink-features=AutomationControlled',
             ],
         };
 
@@ -155,7 +323,6 @@ class InstagramService {
                 username: proxy.username,
                 password: proxy.password,
             };
-            logger.debug('Using proxy:', { server: proxy.server });
         }
 
         return await chromium.launch(launchOptions);
@@ -181,61 +348,31 @@ class InstagramService {
         // Add stealth scripts
         await context.addInitScript(() => {
             // Remove webdriver property
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-            // Mock plugins
+            // Add plugins
             Object.defineProperty(navigator, 'plugins', {
                 get: () => [1, 2, 3, 4, 5],
             });
 
-            // Mock languages
+            // Add languages
             Object.defineProperty(navigator, 'languages', {
                 get: () => ['pt-BR', 'pt', 'en-US', 'en'],
             });
 
-            // Mock platform
-            Object.defineProperty(navigator, 'platform', {
-                get: () => 'Win32',
-            });
-
-            // Mock hardware concurrency
-            Object.defineProperty(navigator, 'hardwareConcurrency', {
-                get: () => 8,
-            });
-
-            // Mock WebGL
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function (parameter) {
-                if (parameter === 37445) {
-                    return 'Intel Inc.';
-                }
-                if (parameter === 37446) {
-                    return 'Intel Iris OpenGL Engine';
-                }
-                return getParameter.call(this, parameter);
-            };
-
-            // Mock chrome object
-            window.chrome = {
-                runtime: {},
-            };
-
-            // Override permissions query
+            // Override permissions
             const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
+            window.navigator.permissions.query = (parameters) =>
+                parameters.name === 'notifications'
+                    ? Promise.resolve({ state: 'denied' })
+                    : originalQuery(parameters);
         });
 
         return context;
     }
 
     /**
-     * Set up request/response interception to capture comments
+     * Setup response interception to capture comments from GraphQL responses
      * @param {Page} page
      * @param {Array} comments - Array to store intercepted comments
      * @param {string} postId
@@ -361,143 +498,130 @@ class InstagramService {
      * @param {string} postUrl
      */
     async navigateToPost(page, postUrl) {
-        // First visit Instagram homepage
-        await page.goto('https://www.instagram.com/', {
-            waitUntil: 'domcontentloaded',
-            timeout: config.scraping.pageTimeout,
-        });
+        logger.debug('Navigating to post', { postUrl });
 
-        await randomDelay(1500, 2500);
-
-        // Handle cookie consent popup if present
-        try {
-            const acceptButton = await page.$('button:has-text("Accept")');
-            if (acceptButton) {
-                await acceptButton.click();
-                await randomDelay(500, 1000);
-            }
-        } catch (e) {
-            // Ignore
-        }
-
-        // Navigate to the specific post
         await page.goto(postUrl, {
             waitUntil: 'networkidle',
             timeout: config.scraping.pageTimeout,
         });
 
-        await randomDelay(2000, 3000);
-
-        // Wait for comments section to load
-        await page.waitForSelector('article', { timeout: 10000 }).catch(() => { });
+        await randomDelay(2000, 4000);
     }
 
     /**
-     * Scroll and load all comments
+     * Wait for comments section to load
      * @param {Page} page
      */
-    async loadAllComments(page) {
-        let scrollCount = 0;
-        let lastCommentCount = 0;
-        let noNewCommentsCount = 0;
+    async waitForComments(page) {
+        const commentSelectors = [
+            'ul ul', // Comment list structure
+            '[data-testid="post-comment"]',
+            'div[class*="comment"]',
+        ];
 
-        while (scrollCount < config.scraping.maxScrolls) {
-            // Try to click "Load more comments" button if available
+        for (const selector of commentSelectors) {
             try {
-                const loadMoreSelectors = [
-                    'button:has-text("View more comments")',
-                    'button:has-text("View all")',
-                    'button:has-text("Load more")',
-                    '[aria-label="Load more comments"]',
-                    'li button svg[aria-label="Load more comments"]',
-                ];
+                await page.waitForSelector(selector, { timeout: 10000 });
+                logger.debug('Comments section found', { selector });
+                return;
+            } catch (e) {
+                // Try next selector
+            }
+        }
 
-                for (const selector of loadMoreSelectors) {
+        logger.warn('Could not find comments section, proceeding anyway');
+    }
+
+    /**
+     * Scroll to load more comments
+     * @param {Page} page
+     */
+    async scrollForMoreComments(page) {
+        const maxScrolls = config.scraping.maxScrolls || 10;
+
+        for (let i = 0; i < maxScrolls; i++) {
+            // Look for "Load more comments" button
+            const loadMoreButtons = [
+                'button:has-text("View more comments")',
+                'button:has-text("Ver mais comentários")',
+                'button:has-text("Load more")',
+                'span:has-text("View all")',
+            ];
+
+            let clicked = false;
+            for (const selector of loadMoreButtons) {
+                try {
                     const button = await page.$(selector);
                     if (button) {
                         await button.click();
-                        await randomDelay(1500, 2500);
+                        clicked = true;
+                        await randomDelay(1500, 3000);
+                        break;
                     }
+                } catch (e) {
+                    // Button not found or not clickable
                 }
-            } catch (e) {
-                // No more load buttons
             }
 
-            // Scroll down to load more comments
-            await page.evaluate(() => {
-                const commentsSection = document.querySelector('ul[class*="Comment"]') || document.body;
-                commentsSection.scrollTop = commentsSection.scrollHeight;
-                window.scrollBy(0, 500);
-            });
+            // Also scroll the page
+            await page.evaluate(() => window.scrollBy(0, 300));
+            await randomDelay(1000, 2000);
 
-            await randomDelay(config.scraping.minDelay, config.scraping.maxDelay);
-
-            // Count current comments on page
-            const currentCommentCount = await page.evaluate(() => {
-                const commentElements = document.querySelectorAll('ul li span[dir="auto"]');
-                return commentElements.length;
-            });
-
-            // Check if we're still loading new comments
-            if (currentCommentCount === lastCommentCount) {
-                noNewCommentsCount++;
-                if (noNewCommentsCount >= 3) {
-                    logger.debug('No new comments loaded, stopping scroll');
-                    break;
-                }
-            } else {
-                noNewCommentsCount = 0;
-                lastCommentCount = currentCommentCount;
+            // If no load more button found for 3 iterations, stop
+            if (!clicked && i >= 3) {
+                break;
             }
-
-            scrollCount++;
-            logger.debug(`Scroll ${scrollCount}/${config.scraping.maxScrolls}, comments: ${currentCommentCount}`);
         }
     }
 
     /**
-     * Extract comments directly from page HTML (fallback method)
+     * Extract comments directly from DOM as fallback
      * @param {Page} page
      * @param {string} postId
      * @param {string} postUrl
-     * @returns {Promise<Array>} Extracted comments
+     * @returns {Promise<Array>}
      */
-    async extractCommentsFromPage(page, postId, postUrl) {
+    async extractCommentsFromDOM(page, postId, postUrl) {
         const comments = [];
 
         try {
-            // Try to get comments from page data
-            const pageData = await page.evaluate(() => {
-                // Look for embedded data
-                const scripts = document.querySelectorAll('script[type="application/json"]');
-                for (const script of scripts) {
-                    try {
-                        const data = JSON.parse(script.textContent);
-                        if (data && (data.shortcode_media || data.graphql)) {
-                            return data;
+            // Try to find comment elements
+            const commentElements = await page.$$('ul ul li');
+
+            for (const element of commentElements) {
+                try {
+                    const usernameEl = await element.$('a[href^="/"]');
+                    const textEl = await element.$('span[dir="auto"]');
+
+                    if (usernameEl && textEl) {
+                        const username = await usernameEl.getAttribute('href');
+                        const text = await textEl.textContent();
+
+                        if (username && text && text.trim()) {
+                            comments.push({
+                                post_id: postId,
+                                post_url: postUrl,
+                                comment_id: `dom_${Date.now()}_${comments.length}`,
+                                text: text.trim(),
+                                username: username.replace(/\//g, ''),
+                                created_at: new Date().toISOString(),
+                                user_id: '',
+                                profile_pic_url: '',
+                                like_count: 0,
+                            });
                         }
-                    } catch (e) { }
+                    }
+                } catch (e) {
+                    // Skip invalid element
                 }
-
-                // Try window data
-                if (window.__additionalDataLoaded) {
-                    return window.__additionalDataLoaded;
-                }
-
-                if (window._sharedData) {
-                    return window._sharedData;
-                }
-
-                return null;
-            });
-
-            if (pageData) {
-                const extracted = this.extractCommentsFromResponse(pageData, postId, postUrl);
-                comments.push(...extracted);
             }
 
-        } catch (e) {
-            logger.debug('Error extracting comments from page:', e.message);
+            if (comments.length > 0) {
+                logger.info(`Extracted ${comments.length} comments from DOM`);
+            }
+
+        } catch (error) {
+            logger.debug('Error extracting comments from DOM:', error.message);
         }
 
         return comments;
@@ -505,59 +629,47 @@ class InstagramService {
 
     /**
      * Save comments to Supabase
-     * @param {Array} comments - Comments to save
-     * @returns {Promise<Object>} Result with saved count
+     * @param {Array} comments
+     * @param {string} postId
+     * @returns {Promise<number>} Number of saved comments
      */
-    async saveComments(comments) {
-        if (!comments || comments.length === 0) {
-            return { saved: 0, errors: 0 };
+    async saveComments(comments, postId) {
+        if (comments.length === 0) {
+            return 0;
         }
 
-        let saved = 0;
-        let errors = 0;
+        try {
+            // Deduplicate by comment_id
+            const uniqueComments = [];
+            const seenIds = new Set();
 
-        // Batch insert (Supabase supports upsert)
-        const batchSize = 100;
-        for (let i = 0; i < comments.length; i += batchSize) {
-            const batch = comments.slice(i, i + batchSize);
-
-            try {
-                const { error } = await supabase
-                    .from('instagram_comments')
-                    .upsert(batch, {
-                        onConflict: 'comment_id',
-                        ignoreDuplicates: true,
-                    });
-
-                if (error) {
-                    logger.error('Error saving comments batch:', error);
-                    errors += batch.length;
-                } else {
-                    saved += batch.length;
+            for (const comment of comments) {
+                if (!seenIds.has(comment.comment_id)) {
+                    seenIds.add(comment.comment_id);
+                    uniqueComments.push(comment);
                 }
-            } catch (e) {
-                logger.error('Error in saveComments:', e);
-                errors += batch.length;
             }
-        }
 
-        logger.info(`Saved ${saved} comments, ${errors} errors`);
-        return { saved, errors };
-    }
+            // Upsert to Supabase (insert or update on conflict)
+            const { data, error } = await supabase
+                .from('instagram_comments')
+                .upsert(uniqueComments, {
+                    onConflict: 'comment_id',
+                    ignoreDuplicates: false,
+                });
 
-    /**
-     * Close all active browsers (cleanup)
-     */
-    async cleanup() {
-        for (const browser of this.activeBrowsers) {
-            try {
-                await browser.close();
-            } catch (e) {
-                // Ignore
+            if (error) {
+                logger.error('Error saving comments to Supabase:', error);
+                return 0;
             }
+
+            logger.info(`Saved ${uniqueComments.length} comments to database`);
+            return uniqueComments.length;
+
+        } catch (error) {
+            logger.error('Error in saveComments:', error);
+            return 0;
         }
-        this.activeBrowsers.clear();
-        logger.info('Instagram service cleanup completed');
     }
 }
 

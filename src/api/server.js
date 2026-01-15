@@ -10,6 +10,7 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const { validatePostUrl, extractPostId } = require('../utils/helpers');
 const proxyService = require('../services/proxy.service');
+const accountPool = require('../services/accountPool.service');
 const worker = require('../workers/scraper.worker');
 
 // Initialize Express app
@@ -55,6 +56,7 @@ app.get('/api/health', async (req, res) => {
         }
 
         const proxyStats = proxyService.getStats();
+        const accountStats = accountPool.getStatus();
 
         res.json({
             status: 'ok',
@@ -66,6 +68,12 @@ app.get('/api/health', async (req, res) => {
                 ...queueStats.totals,
             },
             proxies: proxyStats,
+            accounts: {
+                total: accountStats.total,
+                active: accountStats.active,
+                banned: accountStats.banned,
+                withSession: accountStats.withSession
+            }
         });
     } catch (error) {
         logger.error('Health check error:', error);
@@ -397,6 +405,28 @@ app.post('/api/admin/proxies/reset', (req, res) => {
     res.json({
         message: 'Proxy stats reset',
         stats: proxyService.getStats(),
+    });
+});
+
+/**
+ * Get account pool status (admin)
+ * GET /api/admin/accounts
+ */
+app.get('/api/admin/accounts', (req, res) => {
+    const status = accountPool.getStatus();
+    res.json(status);
+});
+
+/**
+ * Reset a banned account (admin)
+ * POST /api/admin/accounts/:username/reset
+ */
+app.post('/api/admin/accounts/:username/reset', (req, res) => {
+    const { username } = req.params;
+    accountPool.resetAccount(username);
+    res.json({
+        message: `Account ${username} reset to active`,
+        status: accountPool.getStatus()
     });
 });
 
