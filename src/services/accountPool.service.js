@@ -28,15 +28,43 @@ class AccountPoolService {
 
         try {
             const accountsJson = process.env.INSTAGRAM_ACCOUNTS || '[]';
-            this.accounts = JSON.parse(accountsJson);
 
-            if (!Array.isArray(this.accounts) || this.accounts.length === 0) {
+            // Log for debugging
+            logger.debug('Raw INSTAGRAM_ACCOUNTS value:', accountsJson.substring(0, 100));
+
+            let parsed;
+            try {
+                parsed = JSON.parse(accountsJson);
+            } catch (parseError) {
+                logger.error('Failed to parse INSTAGRAM_ACCOUNTS JSON:', parseError.message);
+                logger.error('Value received:', accountsJson.substring(0, 200));
+                this.accounts = [];
+                this.initialized = true;
+                return;
+            }
+
+            // Ensure it's an array
+            if (!Array.isArray(parsed)) {
+                logger.error('INSTAGRAM_ACCOUNTS must be a JSON array, got:', typeof parsed);
+                this.accounts = [];
+                this.initialized = true;
+                return;
+            }
+
+            this.accounts = parsed;
+
+            if (this.accounts.length === 0) {
                 logger.warn('No Instagram accounts configured. Add INSTAGRAM_ACCOUNTS env variable.');
+                this.initialized = true;
                 return;
             }
 
             // Validate each account
             this.accounts = this.accounts.filter((acc, index) => {
+                if (!acc || typeof acc !== 'object') {
+                    logger.warn(`Account at index ${index} is not an object, skipping`);
+                    return false;
+                }
                 if (!acc.username || !acc.password) {
                     logger.warn(`Account at index ${index} missing username or password, skipping`);
                     return false;
@@ -45,26 +73,31 @@ class AccountPoolService {
             });
 
             // Initialize status for each account
-            this.accounts.forEach(acc => {
+            for (const acc of this.accounts) {
                 this.accountStatus.set(acc.username, {
                     status: 'active',
                     lastUsed: null,
                     errorCount: 0,
                     lastError: null
                 });
-            });
+            }
 
             // Ensure sessions directory exists
-            if (!fs.existsSync(SESSIONS_DIR)) {
-                fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+            try {
+                if (!fs.existsSync(SESSIONS_DIR)) {
+                    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+                }
+            } catch (fsError) {
+                logger.warn('Could not create sessions directory:', fsError.message);
             }
 
             this.initialized = true;
             logger.info(`AccountPool initialized with ${this.accounts.length} accounts`);
 
         } catch (error) {
-            logger.error('Error initializing account pool:', error);
+            logger.error('Error initializing account pool:', error.message);
             this.accounts = [];
+            this.initialized = true;
         }
     }
 
@@ -205,6 +238,11 @@ class AccountPoolService {
      * @returns {Object}
      */
     getStatus() {
+        // Ensure accounts is always an array
+        if (!Array.isArray(this.accounts)) {
+            this.accounts = [];
+        }
+
         const statuses = {
             total: this.accounts.length,
             active: 0,
@@ -212,19 +250,22 @@ class AccountPoolService {
             withSession: 0
         };
 
-        this.accounts.forEach(acc => {
+        for (const acc of this.accounts) {
+            if (!acc || !acc.username) continue;
             const status = this.accountStatus.get(acc.username);
-            if (status.status === 'active') statuses.active++;
-            if (status.status === 'banned') statuses.banned++;
+            if (status) {
+                if (status.status === 'active') statuses.active++;
+                if (status.status === 'banned') statuses.banned++;
+            }
             if (this.hasSession(acc.username)) statuses.withSession++;
-        });
+        }
 
         return {
             ...statuses,
             accounts: this.accounts.map(acc => ({
-                username: acc.username,
-                ...this.accountStatus.get(acc.username),
-                hasSession: this.hasSession(acc.username)
+                username: acc?.username || 'unknown',
+                ...(this.accountStatus.get(acc?.username) || {}),
+                hasSession: acc?.username ? this.hasSession(acc.username) : false
             }))
         };
     }
