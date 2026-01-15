@@ -11,6 +11,9 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install --omit=dev
 
+# Install Firefox browser (for scraping)
+RUN npx playwright install firefox --with-deps
+
 # Copy application code
 COPY . .
 

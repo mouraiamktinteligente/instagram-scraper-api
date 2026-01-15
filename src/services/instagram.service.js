@@ -3,7 +3,7 @@
  * Core scraping service using Playwright with multi-account login support
  */
 
-const { chromium } = require('playwright');
+const { firefox } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -524,14 +524,11 @@ class InstagramService {
     async launchBrowser(proxy = null) {
         const launchOptions = {
             headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
-                '--window-size=1920,1080',
-            ],
+            // Firefox-specific args
+            firefoxUserPrefs: {
+                'media.navigator.enabled': false,
+                'media.peerconnection.enabled': false,
+            },
         };
 
         if (proxy && proxy.server) {
@@ -542,7 +539,8 @@ class InstagramService {
             };
         }
 
-        return await chromium.launch(launchOptions);
+        logger.info('[BROWSER] Launching Firefox browser...');
+        return await firefox.launch(launchOptions);
     }
 
     /**
