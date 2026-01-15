@@ -1,0 +1,41 @@
+# Dependencies (will be installed in container)
+node_modules/
+
+# Git
+.git/
+.gitignore
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# Documentation (not needed in container)
+*.md
+!README.md
+
+# Tests
+tests/
+coverage/
+playwright-report/
+test-results/
+
+# Docker files (avoid recursion)
+Dockerfile
+docker-compose.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary
+tmp/
+temp/

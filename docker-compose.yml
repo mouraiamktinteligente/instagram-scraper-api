@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Instagram Scraper API
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: instagram-scraper
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # Supabase
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Proxies
+      - PROXIES=${PROXIES}
+      # Rate Limiting
+      - REQUESTS_PER_MINUTE=${REQUESTS_PER_MINUTE:-30}
+      # API
+      - PORT=3000
+      - NODE_ENV=production
+      # Webhook (optional)
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # CRON
+      - DOCID_CRON_SCHEDULE=${DOCID_CRON_SCHEDULE:-0 3 * * *}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    volumes:
+      - scraper-logs:/app/logs
+    networks:
+      - scraper-network
+
+  # Redis for Bull Queue
+  redis:
+    image: redis:7-alpine
+    container_name: instagram-scraper-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - scraper-network
+
+volumes:
+  redis-data:
+    driver: local
+  scraper-logs:
+    driver: local
+
+networks:
+  scraper-network:
+    driver: bridge

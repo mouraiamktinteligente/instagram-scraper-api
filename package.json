@@ -1,0 +1,43 @@
+{
+  "name": "instagram-scraper-api",
+  "version": "1.0.0",
+  "description": "Instagram Comments Scraper API with Bull Queue, Playwright and Supabase",
+  "main": "src/api/server.js",
+  "scripts": {
+    "start": "node src/api/server.js",
+    "start:workers": "node src/workers/scraper.worker.js",
+    "start:all": "node src/workers/scraper.worker.js & node src/api/server.js",
+    "start:cron": "node cron/update-docids.cron.js",
+    "dev": "NODE_ENV=development node src/api/server.js",
+    "docker:build": "docker build -t instagram-scraper .",
+    "docker:run": "docker-compose up -d"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.3",
+    "axios": "^1.6.5",
+    "bottleneck": "^2.19.5",
+    "bull": "^4.12.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2",
+    "node-cron": "^3.0.3",
+    "playwright": "^1.40.1",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "instagram",
+    "scraper",
+    "api",
+    "bull",
+    "playwright"
+  ],
+  "author": "",
+  "license": "MIT"
+}
