@@ -12,9 +12,10 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install --omit=dev
 
-# Verify Playwright browsers are available (they come pre-installed in this image)
-# If not found, install them
-RUN npx playwright install chromium || true
+# Ensure the browser directory exists and install Chromium with all dependencies
+# Remove || true to fail loudly if installation fails
+RUN mkdir -p /ms-playwright
+RUN npx playwright install --with-deps chromium
 
 # Copy application code
 COPY . .
