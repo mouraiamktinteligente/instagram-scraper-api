@@ -300,23 +300,96 @@ class InstagramService {
                 logger.warn('[LOGIN] Step 2: Cookie consent handling error:', e.message);
             }
 
-            // Step 3: Wait for and fill username
-            logger.info('[LOGIN] Step 3: Waiting for username field...');
-            await page.waitForSelector('input[name="username"]', { timeout: 15000 });
-            await page.fill('input[name="username"]', account.username);
-            logger.info('[LOGIN] Step 3: Username filled');
+            // Step 3: Debug - log what's on the page
+            logger.info('[LOGIN] Step 3: Analyzing page content...');
+            try {
+                // Wait for page to be fully loaded
+                await page.waitForLoadState('domcontentloaded');
+                await randomDelay(2000, 3000);
+
+                // Log page title and current URL
+                const title = await page.title();
+                const currentUrl = page.url();
+                logger.info(`[LOGIN] Page title: "${title}"`);
+                logger.info(`[LOGIN] Current URL: ${currentUrl}`);
+
+                // Check what elements exist on the page
+                const hasUsernameInput = await page.$('input[name="username"]');
+                const hasPasswordInput = await page.$('input[name="password"]');
+                const hasLoginButton = await page.$('button[type="submit"]');
+                const hasAnyInput = await page.$$('input');
+                const hasAnyButton = await page.$$('button');
+
+                logger.info(`[LOGIN] Found elements: username=${!!hasUsernameInput}, password=${!!hasPasswordInput}, loginBtn=${!!hasLoginButton}`);
+                logger.info(`[LOGIN] Total inputs: ${hasAnyInput.length}, Total buttons: ${hasAnyButton.length}`);
+
+                // Log first 500 chars of page content for debugging
+                const bodyContent = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || 'No body content');
+                logger.info(`[LOGIN] Page text preview: ${bodyContent.replace(/\n/g, ' ').substring(0, 200)}`);
+
+                // Check if page is showing login blocked message
+                const pageHtml = await page.content();
+                if (pageHtml.includes('suspicious') || pageHtml.includes('Suspicious')) {
+                    logger.error('[LOGIN] Instagram detected suspicious activity');
+                }
+                if (pageHtml.includes('try again') || pageHtml.includes('Try Again')) {
+                    logger.error('[LOGIN] Instagram showing "try again" message');
+                }
+                if (pageHtml.includes('JavaScript') || pageHtml.includes('javascript')) {
+                    logger.warn('[LOGIN] Page may require JavaScript - checking...');
+                }
+
+            } catch (debugError) {
+                logger.warn('[LOGIN] Debug error:', debugError.message);
+            }
+
+            // Step 4: Wait for and fill username (with longer timeout)
+            logger.info('[LOGIN] Step 4: Waiting for username field...');
+
+            // Try multiple selectors for username field
+            const usernameSelectors = [
+                'input[name="username"]',
+                'input[aria-label="Phone number, username, or email"]',
+                'input[aria-label="Telefone, nome de usuário ou email"]',
+                'input[type="text"]',
+                'form input:first-of-type'
+            ];
+
+            let usernameInput = null;
+            for (const selector of usernameSelectors) {
+                try {
+                    await page.waitForSelector(selector, { timeout: 5000 });
+                    usernameInput = await page.$(selector);
+                    if (usernameInput) {
+                        logger.info(`[LOGIN] Found username field with selector: ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            if (!usernameInput) {
+                logger.error('[LOGIN] Could not find any username input field!');
+                logger.error('[LOGIN] This may be due to Instagram blocking headless browsers');
+                await page.close();
+                return false;
+            }
+
+            await usernameInput.fill(account.username);
+            logger.info('[LOGIN] Step 4: Username filled');
             await randomDelay(500, 1000);
 
-            // Step 4: Fill password
-            logger.info('[LOGIN] Step 4: Filling password...');
+            // Step 5: Fill password
+            logger.info('[LOGIN] Step 5: Filling password...');
             await page.fill('input[name="password"]', account.password);
-            logger.info('[LOGIN] Step 4: Password filled');
+            logger.info('[LOGIN] Step 5: Password filled');
             await randomDelay(500, 1000);
 
-            // Step 5: Click login button
-            logger.info('[LOGIN] Step 5: Clicking login button...');
+            // Step 6: Click login button
+            logger.info('[LOGIN] Step 6: Clicking login button...');
             await page.click('button[type="submit"]');
-            logger.info('[LOGIN] Step 5: Login button clicked, waiting for response...');
+            logger.info('[LOGIN] Step 6: Login button clicked, waiting for response...');
 
             // Step 6: Wait for navigation or error
             await randomDelay(5000, 8000);
