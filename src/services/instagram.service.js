@@ -805,23 +805,35 @@ class InstagramService {
      * @param {Page} page
      */
     async waitForComments(page) {
+        // Instagram's comment section selectors (updated for 2024+ DOM structure)
         const commentSelectors = [
-            'ul ul', // Comment list structure
-            '[data-testid="post-comment"]',
-            'div[class*="comment"]',
+            'article div > ul', // Common comment list structure
+            'article ul li div span', // Comment text areas
+            'div[role="dialog"] ul > div', // Modal comment structure
+            '[data-testid="post-comment-root"]',
+            'ul ul', // Nested list structure
+            'div[class*="Comment"]', // Class-based detection
+            'article section', // Post sections
         ];
+
+        logger.info('[SCRAPE] Looking for comments section...');
 
         for (const selector of commentSelectors) {
             try {
-                await page.waitForSelector(selector, { timeout: 10000 });
-                logger.debug('Comments section found', { selector });
-                return;
+                const element = await page.waitForSelector(selector, { timeout: 8000 });
+                if (element) {
+                    logger.info(`[SCRAPE] Comments section found with selector: ${selector}`);
+                    return true;
+                }
             } catch (e) {
                 // Try next selector
             }
         }
 
-        logger.warn('Could not find comments section, proceeding anyway');
+        // Even if we can't find specific comments, the page might still have them
+        // via GraphQL interception
+        logger.warn('[SCRAPE] Could not find comments section, proceeding with GraphQL interception...');
+        return false;
     }
 
     /**
@@ -875,32 +887,75 @@ class InstagramService {
      */
     async extractCommentsFromDOM(page, postId, postUrl) {
         const comments = [];
+        logger.info('[SCRAPE] Attempting DOM extraction for comments...');
 
         try {
-            // Try to find comment elements
-            const commentElements = await page.$$('ul ul li');
+            // Multiple selector strategies for Instagram's DOM
+            const commentContainerSelectors = [
+                'article ul > ul > div', // Nested comment structure
+                'article div[role="button"] + ul li', // Comment list after buttons
+                'ul ul li', // Generic nested list
+                'div[class*="Comment"] > div', // Class-based
+            ];
+
+            let commentElements = [];
+
+            for (const selector of commentContainerSelectors) {
+                try {
+                    const elements = await page.$$(selector);
+                    if (elements.length > 0) {
+                        logger.info(`[SCRAPE] Found ${elements.length} potential comment elements with: ${selector}`);
+                        commentElements = elements;
+                        break;
+                    }
+                } catch (e) {
+                    continue;
+                }
+            }
+
+            // Log page structure for debugging
+            const pageStats = await page.evaluate(() => {
+                return {
+                    totalLinks: document.querySelectorAll('a').length,
+                    totalSpans: document.querySelectorAll('span').length,
+                    totalUls: document.querySelectorAll('ul').length,
+                    hasArticle: !!document.querySelector('article'),
+                    bodyTextLength: document.body?.innerText?.length || 0
+                };
+            });
+            logger.info('[SCRAPE] Page DOM stats:', pageStats);
 
             for (const element of commentElements) {
                 try {
-                    const usernameEl = await element.$('a[href^="/"]');
-                    const textEl = await element.$('span[dir="auto"]');
+                    // Try multiple approaches to extract username and text
+                    const usernameEl = await element.$('a[href^="/"][role="link"]') ||
+                        await element.$('a[href^="/"]') ||
+                        await element.$('span a');
+                    const textEl = await element.$('span[dir="auto"]') ||
+                        await element.$('span > span') ||
+                        await element.$('div > span');
 
                     if (usernameEl && textEl) {
-                        const username = await usernameEl.getAttribute('href');
+                        const usernameHref = await usernameEl.getAttribute('href');
                         const text = await textEl.textContent();
 
-                        if (username && text && text.trim()) {
-                            comments.push({
-                                post_id: postId,
-                                post_url: postUrl,
-                                comment_id: `dom_${Date.now()}_${comments.length}`,
-                                text: text.trim(),
-                                username: username.replace(/\//g, ''),
-                                created_at: new Date().toISOString(),
-                                user_id: '',
-                                profile_pic_url: '',
-                                like_count: 0,
-                            });
+                        if (usernameHref && text && text.trim().length > 0) {
+                            const username = usernameHref.replace(/\//g, '').split('?')[0];
+
+                            // Skip if this looks like the post author or navigation
+                            if (username && username.length > 0 && !username.includes('explore')) {
+                                comments.push({
+                                    post_id: postId,
+                                    post_url: postUrl,
+                                    comment_id: `dom_${Date.now()}_${comments.length}`,
+                                    text: text.trim(),
+                                    username: username,
+                                    created_at: new Date().toISOString(),
+                                    user_id: '',
+                                    profile_pic_url: '',
+                                    like_count: 0,
+                                });
+                            }
                         }
                     }
                 } catch (e) {
@@ -909,11 +964,13 @@ class InstagramService {
             }
 
             if (comments.length > 0) {
-                logger.info(`Extracted ${comments.length} comments from DOM`);
+                logger.info(`[SCRAPE] Extracted ${comments.length} comments from DOM`);
+            } else {
+                logger.warn('[SCRAPE] No comments extracted from DOM');
             }
 
         } catch (error) {
-            logger.debug('Error extracting comments from DOM:', error.message);
+            logger.error('[SCRAPE] Error extracting comments from DOM:', error.message);
         }
 
         return comments;

@@ -98,11 +98,8 @@ function createQueue(name, proxy, index) {
                 started_at: new Date().toISOString()
             });
 
-            // Perform scraping
+            // Perform scraping (returns { success, commentsCount, savedCount, ... })
             const result = await instagramService.scrapeComments(postUrl, proxy, jobId);
-
-            // Save comments to database
-            const saveResult = await instagramService.saveComments(result.comments);
 
             // Report proxy success
             if (proxy) {
@@ -112,11 +109,11 @@ function createQueue(name, proxy, index) {
             // Update job status to completed
             await updateJobStatus(jobId, 'completed', {
                 completed_at: new Date().toISOString(),
-                comments_count: result.commentsCount,
+                comments_count: result.commentsCount || 0,
                 result: {
-                    duration: result.duration,
-                    saved: saveResult.saved,
-                    errors: saveResult.errors,
+                    duration: result.duration || 0,
+                    saved: result.savedCount || 0,
+                    errors: 0,
                 },
             });
 
@@ -125,8 +122,8 @@ function createQueue(name, proxy, index) {
 
             logger.queue(`Job completed`, {
                 jobId,
-                commentsCount: result.commentsCount,
-                duration: result.duration,
+                commentsCount: result.commentsCount || 0,
+                savedCount: result.savedCount || 0,
             });
 
             return result;
