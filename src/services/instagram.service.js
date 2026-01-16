@@ -835,102 +835,92 @@ class InstagramService {
     }
 
     /**
-     * Check if an object looks like a real comment (not UI element)
+     * Check if an object looks like a real Instagram comment
+     * Real structure: { pk, user: { username }, text, created_at }
      */
     looksLikeComment(obj) {
         if (!obj || typeof obj !== 'object') return false;
 
-        // A comment typically has text and some form of ID
+        // Get text from various possible properties
         const text = obj.text || obj.comment_text || obj.body || '';
-        const hasText = text && text.length > 0;
-        const hasId = !!(obj.id || obj.pk || obj.comment_id || obj.node_id);
-        const hasUser = !!(obj.user || obj.owner || obj.from || obj.username);
+        const hasText = typeof text === 'string' && text.length > 0;
 
-        // Must have text and either ID or user info
-        if (!hasText || (!hasId && !hasUser)) return false;
+        // Check for comment ID (pk is most common in Instagram)
+        const commentId = obj.pk || obj.id || obj.comment_id || obj.node_id;
+        const hasId = !!commentId;
 
-        // Filter out Instagram UI elements and menu items (false positives)
-        const commentId = String(obj.id || obj.pk || obj.comment_id || obj.node_id || '').toLowerCase();
-        const textLower = text.toLowerCase();
+        // Check for user info - Instagram uses user.username structure
+        let hasUser = false;
+        let username = '';
 
-        // Known UI element IDs to exclude
-        const uiElementIds = [
-            'snooze_suggested',
-            'dont_suggest',
-            'hide_suggested',
-            'not_interested',
-            'report',
-            'unfol',
-            'block',
-            'restrict',
-            'uncomfortable',
-            'feedback',
-            'about_this',
-            'why_seeing',
-            'cancel',
-            '_author',
-            '_posts',
-            '_from',
-            'suggested'
+        if (obj.user && typeof obj.user === 'object' && obj.user.username) {
+            hasUser = true;
+            username = obj.user.username;
+        } else if (obj.owner && typeof obj.owner === 'object' && obj.owner.username) {
+            hasUser = true;
+            username = obj.owner.username;
+        } else if (obj.username) {
+            hasUser = true;
+            username = obj.username;
+        }
+
+        // Must have text AND (ID or user info)
+        if (!hasText) return false;
+        if (!hasId && !hasUser) return false;
+
+        // Filter out Instagram UI elements by ID pattern
+        const idStr = String(commentId || '').toLowerCase();
+        const uiElementPatterns = [
+            'snooze', 'dont_suggest', 'hide_', 'not_interested', 'report',
+            'block', 'restrict', 'uncomfortable', 'feedback', 'about_this',
+            'why_seeing', 'cancel', '_author', '_posts', 'suggested', 'menu'
         ];
 
-        for (const uiId of uiElementIds) {
-            if (commentId.includes(uiId)) {
-                return false; // This is a UI element, not a comment
+        for (const pattern of uiElementPatterns) {
+            if (idStr.includes(pattern)) {
+                logger.debug(`[FILTER] Rejecting UI element: id=${idStr}`);
+                return false;
             }
         }
 
-        // Known UI text patterns to exclude
+        // Filter out UI text patterns
+        const textLower = text.toLowerCase();
         const uiTextPatterns = [
-            'ativar modo soneca',
-            'não sugerir',
-            'ocultar sugerido',
-            'denunciar',
-            'bloquear',
-            'restringir',
-            'não me senti bem',
-            'escalar sem destruir',
-            'sobre esta conta',
-            'por que estou vendo',
-            'cancelar',
-            'add to favorites',
-            'go to post',
-            'embed',
-            'share to',
-            'copy link',
-            'hide like count',
-            'turn off commenting'
+            'ativar modo', 'não sugerir', 'ocultar', 'denunciar', 'bloquear',
+            'restringir', 'não me senti', 'sobre esta conta', 'cancelar',
+            'add to favorites', 'go to post', 'embed', 'share to', 'copy link',
+            'hide like count', 'turn off commenting', 'escalar sem'
         ];
 
         for (const pattern of uiTextPatterns) {
             if (textLower.includes(pattern)) {
-                return false; // This is UI text, not a comment
+                logger.debug(`[FILTER] Rejecting UI text: "${text.substring(0, 30)}"`);
+                return false;
             }
         }
 
-        // Additional validation: real comments usually have certain properties
-        // Check for timestamp (created_at, created_time, taken_at, timestamp)
-        const hasTimestamp = !!(obj.created_at || obj.created_time || obj.taken_at || obj.timestamp || obj.created_at_utc);
+        // Real comments have created_at as Unix timestamp (number) or ISO string
+        const hasTimestamp = typeof obj.created_at === 'number' ||
+            (typeof obj.created_at === 'string' && obj.created_at.length > 0) ||
+            typeof obj.created_time === 'number';
 
-        // Real comments often have like counts
-        const hasLikes = obj.like_count !== undefined || obj.likes !== undefined || obj.comment_like_count !== undefined;
-
-        // If it looks like a comment structure (has timestamp or likes), it's more likely real
-        if (hasTimestamp || hasLikes) {
+        // Log when we find a valid comment (for debugging)
+        if (hasText && hasId && hasUser && hasTimestamp) {
+            logger.debug(`[DETECT] Valid comment: pk=${commentId}, user=${username}, text="${text.substring(0, 20)}..."`);
             return true;
         }
 
-        // If text is very short (emoji only) and has user, probably real comment
-        if (hasUser && text.length > 0 && text.length < 50) {
+        // Accept if has user and timestamp even without strict ID
+        if (hasUser && hasTimestamp && hasText) {
             return true;
         }
 
-        // Be more strict: require user info for longer texts
-        if (text.length > 50 && !hasUser) {
-            return false;
+        // Accept short emoji comments with user info
+        if (hasUser && hasText && text.length < 50) {
+            return true;
         }
 
-        return hasUser; // Require user info as final check
+        return false;
     }
 
     /**
