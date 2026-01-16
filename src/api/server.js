@@ -87,11 +87,11 @@ app.get('/api/health', async (req, res) => {
 /**
  * Create a new scrape job
  * POST /api/scrape
- * Body: { postUrl: "https://instagram.com/p/ABC123" }
+ * Body: { postUrl: "https://instagram.com/p/ABC123", maxComments: 100 (optional) }
  */
 app.post('/api/scrape', async (req, res) => {
     try {
-        const { postUrl } = req.body;
+        const { postUrl, maxComments } = req.body;
 
         // Validate input
         if (!postUrl) {
@@ -109,6 +109,9 @@ app.post('/api/scrape', async (req, res) => {
 
         const postId = extractPostId(postUrl);
 
+        // Validate maxComments if provided
+        const commentLimit = maxComments ? Math.max(1, parseInt(maxComments)) : null;
+
         // Create job in database
         const { data: jobData, error: jobError } = await supabase
             .from('scrape_jobs')
@@ -116,6 +119,7 @@ app.post('/api/scrape', async (req, res) => {
                 post_url: postUrl,
                 post_id: postId,
                 status: 'pending',
+                max_comments: commentLimit,  // Store limit in job
             })
             .select()
             .single();
@@ -128,13 +132,14 @@ app.post('/api/scrape', async (req, res) => {
             });
         }
 
-        // Add job to queue
-        const queueResult = await worker.addJob(postUrl, jobData.id);
+        // Add job to queue with optional maxComments
+        const queueResult = await worker.addJob(postUrl, jobData.id, commentLimit);
 
         logger.api('Job created', {
             jobId: jobData.id,
             postUrl,
             postId,
+            maxComments: commentLimit,
         });
 
         res.status(201).json({
@@ -142,6 +147,7 @@ app.post('/api/scrape', async (req, res) => {
             status: 'pending',
             postUrl,
             postId,
+            maxComments: commentLimit,
             queue: queueResult.queueName,
             createdAt: jobData.created_at,
         });

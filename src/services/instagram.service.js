@@ -42,7 +42,7 @@ class InstagramService {
      * @param {Object} proxy - Optional proxy configuration
      * @returns {Promise<Object>} Scraping result
      */
-    async scrapeComments(postUrl, proxy = null) {
+    async scrapeComments(postUrl, proxy = null, jobId = null, maxComments = null) {
         const postId = extractPostId(postUrl);
         if (!postId) {
             throw new Error('Invalid Instagram post URL');
@@ -92,8 +92,8 @@ class InstagramService {
             // Wait for comments to load
             await this.waitForComments(page);
 
-            // Scroll to load more comments
-            await this.scrollForMoreComments(page);
+            // Scroll to load more comments (with optional limit)
+            await this.scrollForMoreComments(page, maxComments, comments);
 
             // Fallback 1: Extract comments from script tags (preloaded data)
             if (comments.length === 0) {
@@ -1450,14 +1450,15 @@ class InstagramService {
      * Scroll to load more comments
      * @param {Page} page
      */
-    async scrollForMoreComments(page) {
-        const maxScrolls = config.scraping.maxScrolls || 100; // Increased max as safety limit
+    async scrollForMoreComments(page, maxComments = null, commentsArray = []) {
+        const maxScrolls = config.scraping.maxScrolls || 100; // Safety limit
         const maxNoChangeIterations = 5; // Stop after 5 iterations with no new comments
         let totalClicks = 0;
         let previousCommentCount = 0;
         let noChangeCount = 0;
 
-        logger.info(`[SCRAPE] Starting intelligent scroll for comments (safety limit: ${maxScrolls})...`);
+        const hasLimit = maxComments && maxComments > 0;
+        logger.info(`[SCRAPE] Starting intelligent scroll for comments (limit: ${hasLimit ? maxComments : 'unlimited'}, safety: ${maxScrolls})...`);
 
         for (let i = 0; i < maxScrolls; i++) {
             // Count current comments (via intercepted data or DOM)
@@ -1481,6 +1482,12 @@ class InstagramService {
                 logger.info(`[SCRAPE] Comments: ${previousCommentCount} → ${currentCommentCount} (+${currentCommentCount - previousCommentCount})`);
             }
             previousCommentCount = currentCommentCount;
+
+            // Check if we've reached the comment limit (using intercepted comments array)
+            if (hasLimit && commentsArray.length >= maxComments) {
+                logger.info(`[SCRAPE] ✅ Reached comment limit! ${commentsArray.length}/${maxComments}`);
+                break;
+            }
 
             // Look for "Load more comments" or "View all comments" buttons/links
             const loadMoreSelectors = [
