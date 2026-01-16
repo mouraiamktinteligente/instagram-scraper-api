@@ -22,6 +22,7 @@
     "express": "^4.18.2",
     "ioredis": "^5.3.2",
     "node-cron": "^3.0.3",
+    "otplib": "^13.1.1",
     "playwright": "1.40.1",
     "winston": "^3.11.0"
   },

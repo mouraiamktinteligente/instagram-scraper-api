@@ -55,6 +55,7 @@ class AccountPoolService {
                 id: row.id,
                 username: row.username,
                 password: row.password,
+                totpSecret: row.totp_secret || null,  // 2FA TOTP secret
                 sessionData: row.session_data,
             }));
 

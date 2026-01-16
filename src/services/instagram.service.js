@@ -5,6 +5,7 @@
 
 const { firefox } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
+const { authenticator } = require('otplib');
 const config = require('../config');
 const logger = require('../utils/logger');
 const accountPool = require('./accountPool.service');
@@ -450,12 +451,30 @@ class InstagramService {
                 return false;
             }
 
-            // Check for checkpoint/challenge
-            if (currentUrl.includes('challenge') || currentUrl.includes('checkpoint')) {
-                logger.error('[LOGIN] Instagram requires verification (challenge/checkpoint)');
-                logger.error('[LOGIN] Please verify the account manually first');
-                await page.close();
-                return false;
+            // Check for checkpoint/challenge (includes 2FA)
+            if (currentUrl.includes('challenge') || currentUrl.includes('checkpoint') || currentUrl.includes('two_factor')) {
+                logger.info('[LOGIN] Step 7: 2FA/Challenge detected, checking if we can handle it...');
+
+                // Check if this is a 2FA challenge we can handle
+                const is2FAChallenge = await this.handle2FAChallenge(page, account);
+
+                if (is2FAChallenge) {
+                    // Check if we successfully completed 2FA
+                    const finalUrl = page.url();
+                    if (!finalUrl.includes('challenge') && !finalUrl.includes('checkpoint') && !finalUrl.includes('two_factor')) {
+                        logger.info('[LOGIN] ✅ 2FA completed successfully!');
+                        // Continue with login success flow
+                    } else {
+                        logger.error('[LOGIN] ❌ 2FA failed - still on challenge page');
+                        await page.close();
+                        return false;
+                    }
+                } else {
+                    logger.error('[LOGIN] Instagram requires verification (challenge/checkpoint) that we cannot handle');
+                    logger.error('[LOGIN] Please verify the account manually first');
+                    await page.close();
+                    return false;
+                }
             }
 
             // Check for suspicious login activity
@@ -554,6 +573,111 @@ class InstagramService {
             } catch (e) { /* ignore */ }
 
             try { await page.close(); } catch (e) { /* ignore */ }
+            return false;
+        }
+    }
+
+    /**
+     * Handle 2FA challenge by generating TOTP code
+     * @param {Page} page
+     * @param {Object} account
+     * @returns {Promise<boolean>} true if 2FA was handled, false if not
+     */
+    async handle2FAChallenge(page, account) {
+        // Check if account has TOTP secret
+        if (!account.totpSecret) {
+            logger.warn('[2FA] Account does not have TOTP secret configured');
+            return false;
+        }
+
+        try {
+            logger.info('[2FA] Account has TOTP secret, attempting to generate code...');
+
+            // Generate TOTP code
+            const totpCode = authenticator.generate(account.totpSecret);
+            logger.info('[2FA] Generated TOTP code:', totpCode.substring(0, 2) + '****');
+
+            // Wait for the 2FA input field
+            await randomDelay(2000, 3000);
+
+            // Look for 2FA code input field (various selectors)
+            const codeInputSelectors = [
+                'input[name="verificationCode"]',
+                'input[name="security_code"]',
+                'input[aria-label*="Security code"]',
+                'input[aria-label*="código"]',
+                'input[placeholder*="code"]',
+                'input[placeholder*="código"]',
+                'input[type="text"][maxlength="6"]',
+                'input[type="tel"]',
+            ];
+
+            let codeInput = null;
+            for (const selector of codeInputSelectors) {
+                try {
+                    codeInput = await page.waitForSelector(selector, { timeout: 5000 });
+                    if (codeInput) {
+                        logger.info(`[2FA] Found code input with selector: ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            if (!codeInput) {
+                logger.warn('[2FA] Could not find 2FA code input field');
+                return false;
+            }
+
+            // Clear any existing content and type the code
+            await codeInput.fill('');
+            await codeInput.type(totpCode, { delay: 100 });
+            logger.info('[2FA] Code entered');
+
+            // Wait a bit before submitting
+            await randomDelay(1000, 2000);
+
+            // Look for submit/confirm button
+            const submitSelectors = [
+                'button[type="submit"]',
+                'button:has-text("Confirm")',
+                'button:has-text("Confirmar")',
+                'button:has-text("Submit")',
+                'button:has-text("Enviar")',
+                'button:has-text("Verify")',
+                'button:has-text("Verificar")',
+            ];
+
+            let submitted = false;
+            for (const selector of submitSelectors) {
+                try {
+                    const submitBtn = await page.$(selector);
+                    if (submitBtn) {
+                        await submitBtn.click();
+                        logger.info(`[2FA] Clicked submit button: ${selector}`);
+                        submitted = true;
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            if (!submitted) {
+                // Try pressing Enter as fallback
+                await page.keyboard.press('Enter');
+                logger.info('[2FA] Pressed Enter to submit');
+            }
+
+            // Wait for navigation/response
+            await randomDelay(3000, 5000);
+            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+
+            return true;
+
+        } catch (error) {
+            logger.error('[2FA] Error handling 2FA challenge:', error.message);
             return false;
         }
     }
