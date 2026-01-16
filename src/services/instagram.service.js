@@ -550,21 +550,24 @@ class InstagramService {
         };
 
         if (proxy && proxy.server) {
-            // Build proxy URL with embedded credentials if available
-            let proxyServer = proxy.server;
-            if (proxy.username && proxy.password) {
-                // URL-encode credentials to handle special characters like = @ :
-                const encodedUser = encodeURIComponent(proxy.username);
-                const encodedPass = encodeURIComponent(proxy.password);
-                const url = new URL(proxy.server);
-                proxyServer = `${url.protocol}//${encodedUser}:${encodedPass}@${url.host}`;
-            }
-
+            // Try passing credentials separately (Playwright's recommended approach)
             launchOptions.proxy = {
-                server: proxyServer,
+                server: proxy.server,  // Without credentials in URL
             };
 
-            logger.info('[BROWSER] Using proxy:', { server: proxyServer.replace(/:[^:@]+@/, ':***@') });
+            // Add credentials if available
+            if (proxy.username) {
+                launchOptions.proxy.username = proxy.username;
+            }
+            if (proxy.password) {
+                launchOptions.proxy.password = proxy.password;
+            }
+
+            logger.info('[BROWSER] Using proxy:', {
+                server: proxy.server,
+                hasUsername: !!proxy.username,
+                hasPassword: !!proxy.password,
+            });
         }
 
         logger.info('[BROWSER] Launching Firefox browser...');
