@@ -80,7 +80,14 @@ class InstagramService {
             // Scroll to load more comments
             await this.scrollForMoreComments(page);
 
-            // Fallback: Extract comments from DOM if interception didn't catch them
+            // Fallback 1: Extract comments from script tags (preloaded data)
+            if (comments.length === 0) {
+                logger.info('[SCRAPE] Trying to extract from script tags...');
+                const scriptComments = await this.extractCommentsFromScripts(page, postId, postUrl);
+                comments.push(...scriptComments);
+            }
+
+            // Fallback 2: Extract comments from DOM if still no comments
             if (comments.length === 0) {
                 const domComments = await this.extractCommentsFromDOM(page, postId, postUrl);
                 comments.push(...domComments);
@@ -1291,6 +1298,98 @@ class InstagramService {
 
         } catch (error) {
             logger.error('[SCRAPE] Error extracting comments from DOM:', error.message);
+        }
+
+        return comments;
+    }
+
+    /**
+     * Extract comments from script tags containing preloaded JSON data
+     * Instagram preloads comment data in script tags with IDs like 'PolarisPostCommentsContainerQueryRelayPreloader'
+     */
+    async extractCommentsFromScripts(page, postId, postUrl) {
+        const comments = [];
+
+        try {
+            // Get all script tag contents that might contain comment data
+            const scriptData = await page.evaluate(() => {
+                const results = [];
+                const scripts = document.querySelectorAll('script[type="application/json"]');
+
+                scripts.forEach((script, index) => {
+                    try {
+                        const content = script.textContent;
+                        if (content && (content.includes('comment') || content.includes('edge_media'))) {
+                            results.push({
+                                id: script.id || `script-${index}`,
+                                content: content.substring(0, 50000) // Limit size
+                            });
+                        }
+                    } catch (e) { }
+                });
+
+                // Also check for script tags with specific IDs
+                const preloaderScripts = document.querySelectorAll('script[id*="Preloader"]');
+                preloaderScripts.forEach((script, index) => {
+                    try {
+                        const content = script.textContent;
+                        if (content) {
+                            results.push({
+                                id: script.id || `preloader-${index}`,
+                                content: content.substring(0, 50000)
+                            });
+                        }
+                    } catch (e) { }
+                });
+
+                // Also look in __NEXT_DATA__ or other common stores
+                const nextData = document.getElementById('__NEXT_DATA__');
+                if (nextData && nextData.textContent) {
+                    results.push({
+                        id: '__NEXT_DATA__',
+                        content: nextData.textContent.substring(0, 50000)
+                    });
+                }
+
+                return results;
+            });
+
+            logger.info(`[SCRIPTS] Found ${scriptData.length} script tags with potential comment data`);
+
+            for (const script of scriptData) {
+                try {
+                    const data = JSON.parse(script.content);
+                    logger.debug(`[SCRIPTS] Parsing script: ${script.id}`);
+
+                    // Use deep search to find comments
+                    const extracted = this.deepSearchForComments(data, postId, postUrl);
+
+                    if (extracted.length > 0) {
+                        logger.info(`[SCRIPTS] 🎯 Found ${extracted.length} comments in script: ${script.id}`);
+
+                        // Add unique comments only
+                        const existingIds = new Set(comments.map(c => c.comment_id));
+                        for (const comment of extracted) {
+                            if (!existingIds.has(comment.comment_id)) {
+                                comments.push(comment);
+                                existingIds.add(comment.comment_id);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Script content wasn't valid JSON or parsing failed
+                    logger.debug(`[SCRIPTS] Failed to parse script ${script.id}: ${e.message}`);
+                }
+            }
+
+            if (comments.length > 0) {
+                logger.info(`[SCRIPTS] Total comments extracted from scripts: ${comments.length}`);
+            } else {
+                logger.warn('[SCRIPTS] No comments found in script tags');
+            }
+
+        } catch (error) {
+            logger.error('[SCRIPTS] Error extracting from scripts:', error.message);
         }
 
         return comments;
