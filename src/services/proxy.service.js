@@ -77,6 +77,17 @@ class ProxyService {
             });
 
             logger.info(`ProxyService loaded ${this.proxies.length} proxies from database`);
+
+            // Debug: Log first proxy to verify credentials are loaded
+            if (this.proxies.length > 0) {
+                const sample = this.proxies[0];
+                logger.info(`[PROXY DEBUG] Sample proxy:`, {
+                    server: sample.server,
+                    hasUsername: !!sample.username,
+                    hasPassword: !!sample.password,
+                    username: sample.username ? sample.username.substring(0, 4) + '***' : 'MISSING',
+                });
+            }
         } catch (error) {
             logger.error('Error loading proxies from database:', error.message);
             throw error;
