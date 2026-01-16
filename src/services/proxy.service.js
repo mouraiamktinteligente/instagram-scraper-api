@@ -53,7 +53,7 @@ class ProxyService {
 
             this.proxies = (data || []).map(row => ({
                 id: row.id,
-                server: `${row.host}:${row.port}`,  // Concatenate host:port
+                server: `http://${row.host}:${row.port}`,  // Playwright requires http:// prefix
                 host: row.host,
                 port: row.port,
                 username: row.username,
