@@ -220,9 +220,86 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
     throw lastError;
 }
 
+/**
+ * Extract username from Instagram post URL
+ * @param {string} url - Instagram post URL
+ * @returns {string|null} Username or null
+ */
+function extractUsernameFromUrl(url) {
+    if (!url) return null;
+    try {
+        // Pattern: instagram.com/username/p/postId or instagram.com/p/postId
+        const match = url.match(/instagram\.com\/([^\/]+)\/(?:p|reel|tv)\//);
+        if (match && match[1] && match[1] !== 'www') {
+            return match[1];
+        }
+        return null;
+    } catch (error) {
+        return null;
+    }
+}
+
+/**
+ * Simulate human-like click with random offset
+ * @param {Page} page - Playwright page
+ * @param {string} selector - Element selector
+ */
+async function humanClick(page, selector) {
+    const element = await page.$(selector);
+    if (!element) return false;
+
+    // Get element bounding box
+    const box = await element.boundingBox();
+    if (!box) return false;
+
+    // Random offset within the element
+    const x = box.x + Math.random() * box.width;
+    const y = box.y + Math.random() * box.height;
+
+    // Move mouse to position with small delay
+    await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 5) + 3 });
+    await sleep(Math.floor(Math.random() * 200) + 50);
+
+    // Click
+    await page.mouse.click(x, y);
+    return true;
+}
+
+/**
+ * Simulate human-like scrolling
+ * @param {Page} page - Playwright page
+ * @param {number} distance - Distance to scroll (positive = down)
+ */
+async function humanScroll(page, distance = 300) {
+    // Random number of steps
+    const steps = Math.floor(Math.random() * 3) + 2;
+    const stepDistance = distance / steps;
+
+    for (let i = 0; i < steps; i++) {
+        await page.mouse.wheel(0, stepDistance + Math.random() * 50);
+        await sleep(Math.floor(Math.random() * 150) + 50);
+    }
+}
+
+/**
+ * Simulate human-like typing with variable delays
+ * @param {Page} page - Playwright page
+ * @param {string} selector - Input selector
+ * @param {string} text - Text to type
+ */
+async function humanType(page, selector, text) {
+    await page.click(selector);
+    await sleep(Math.floor(Math.random() * 300) + 100);
+
+    for (const char of text) {
+        await page.keyboard.type(char, { delay: Math.floor(Math.random() * 100) + 30 });
+    }
+}
+
 module.exports = {
     randomDelay,
     extractPostId,
+    extractUsernameFromUrl,
     validatePostUrl,
     normalizeInstagramUrl,
     parseComment,
@@ -230,4 +307,7 @@ module.exports = {
     getBrowserHeaders,
     sleep,
     retryWithBackoff,
+    humanClick,
+    humanScroll,
+    humanType,
 };

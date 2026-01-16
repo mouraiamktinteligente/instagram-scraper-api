@@ -82,8 +82,11 @@ class InstagramService {
             const page = await context.newPage();
             this.setupInterception(page, comments, postId, postUrl);
 
-            // Navigate to the post
-            await this.navigateToPost(page, postUrl);
+            // Navigate to the post (optionally via profile first for human-like behavior)
+            await this.navigateToPost(page, postUrl, false); // Set to true to visit profile first
+
+            // Extract post metadata (author, description, likes)
+            const postMetadata = await this.extractPostMetadata(page);
 
             // Wait for comments to load
             await this.waitForComments(page);
@@ -113,7 +116,8 @@ class InstagramService {
             logger.info('[SCRAPE] Scrape completed', {
                 postId,
                 commentsFound: comments.length,
-                commentsSaved: savedCount
+                commentsSaved: savedCount,
+                postAuthor: postMetadata.post_author,
             });
 
             return {
@@ -122,7 +126,11 @@ class InstagramService {
                 postUrl,
                 commentsCount: comments.length,
                 savedCount,
-                account: account.username
+                account: account.username,
+                // Post metadata
+                post_author: postMetadata.post_author,
+                post_description: postMetadata.post_description,
+                post_likes_count: postMetadata.post_likes_count,
             };
 
         } catch (error) {
@@ -596,18 +604,34 @@ class InstagramService {
      * @returns {Promise<BrowserContext>}
      */
     async createBrowserContext(browser) {
+        // Randomize viewport to avoid fingerprinting
+        const viewports = [
+            { width: 1920, height: 1080 },
+            { width: 1366, height: 768 },
+            { width: 1536, height: 864 },
+            { width: 1440, height: 900 },
+            { width: 1280, height: 720 },
+        ];
+        const randomViewport = viewports[Math.floor(Math.random() * viewports.length)];
+
+        // Random device scale factor
+        const scaleFactors = [1, 1.25, 1.5];
+        const randomScale = scaleFactors[Math.floor(Math.random() * scaleFactors.length)];
+
         const context = await browser.newContext({
             userAgent: getRandomUserAgent(),
             locale: 'pt-BR',
             timezoneId: 'America/Sao_Paulo',
-            viewport: { width: 1920, height: 1080 },
-            deviceScaleFactor: 1,
+            viewport: randomViewport,
+            deviceScaleFactor: randomScale,
             hasTouch: false,
             extraHTTPHeaders: getBrowserHeaders(),
-            colorScheme: 'light',
+            colorScheme: Math.random() > 0.5 ? 'light' : 'dark',
             javaScriptEnabled: true,
             bypassCSP: true,
         });
+
+        logger.debug('[BROWSER] Context created with viewport:', randomViewport);
 
         // Enhanced stealth scripts to avoid detection
         await context.addInitScript(() => {
@@ -1098,7 +1122,16 @@ class InstagramService {
      * @param {Page} page
      * @param {string} postUrl
      */
-    async navigateToPost(page, postUrl) {
+    async navigateToPost(page, postUrl, visitProfileFirst = false) {
+        // Option to navigate via profile first (more human-like)
+        if (visitProfileFirst) {
+            const username = this.extractUsernameFromPostPage(postUrl);
+            if (username) {
+                await this.navigateViaProfile(page, username, postUrl);
+                return;
+            }
+        }
+
         logger.info('[SCRAPE] Navigating to post:', postUrl);
 
         await page.goto(postUrl, {
@@ -1133,6 +1166,124 @@ class InstagramService {
         logger.info('[SCRAPE] Post page state:', pageInfo);
 
         await randomDelay(3000, 5000);
+    }
+
+    /**
+     * Extract post metadata (author, description)
+     * @param {Page} page
+     * @returns {Object} Post metadata
+     */
+    async extractPostMetadata(page) {
+        const metadata = {
+            post_author: null,
+            post_description: null,
+            post_likes_count: null,
+        };
+
+        try {
+            const data = await page.evaluate(() => {
+                const result = {};
+
+                // Extract author username
+                const authorLink = document.querySelector('article header a[href^="/"]');
+                if (authorLink) {
+                    const href = authorLink.getAttribute('href');
+                    result.author = href?.replace(/\//g, '') || null;
+                }
+
+                // Extract post description/caption
+                const captionElement = document.querySelector('article div > span[dir="auto"]');
+                if (captionElement) {
+                    result.description = captionElement.innerText?.substring(0, 1000) || null;
+                }
+
+                // Try alternative caption selector
+                if (!result.description) {
+                    const altCaption = document.querySelector('article h1, article div[class*="Caption"] span');
+                    if (altCaption) {
+                        result.description = altCaption.innerText?.substring(0, 1000) || null;
+                    }
+                }
+
+                // Extract likes count
+                const likesElement = document.querySelector('section span[class*="like"], a[href*="liked_by"] span');
+                if (likesElement) {
+                    const likesText = likesElement.innerText;
+                    const match = likesText.match(/[\d,.]+/);
+                    if (match) {
+                        result.likes = parseInt(match[0].replace(/[,.]/g, '')) || null;
+                    }
+                }
+
+                return result;
+            });
+
+            metadata.post_author = data.author || null;
+            metadata.post_description = data.description || null;
+            metadata.post_likes_count = data.likes || null;
+
+            logger.info('[SCRAPE] Post metadata extracted:', {
+                author: metadata.post_author,
+                descriptionLength: metadata.post_description?.length || 0,
+                likes: metadata.post_likes_count,
+            });
+
+        } catch (error) {
+            logger.warn('[SCRAPE] Could not extract post metadata:', error.message);
+        }
+
+        return metadata;
+    }
+
+    /**
+     * Navigate via profile first (more human-like behavior)
+     * @param {Page} page
+     * @param {string} username
+     * @param {string} postUrl
+     */
+    async navigateViaProfile(page, username, postUrl) {
+        logger.info('[SCRAPE] Navigating via profile first:', username);
+
+        // Navigate to profile
+        await page.goto(`https://www.instagram.com/${username}/`, {
+            waitUntil: 'domcontentloaded',
+            timeout: config.scraping.pageTimeout,
+        });
+
+        // Wait for profile to load
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+        // Human-like delay to "browse" profile
+        await randomDelay(3000, 6000);
+
+        // Now navigate to the actual post
+        await page.goto(postUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: config.scraping.pageTimeout,
+        });
+
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+        logger.info('[SCRAPE] Arrived at post via profile');
+        await randomDelay(2000, 4000);
+    }
+
+    /**
+     * Extract username from post URL pattern
+     * @param {string} url
+     * @returns {string|null}
+     */
+    extractUsernameFromPostPage(url) {
+        if (!url) return null;
+        try {
+            const match = url.match(/instagram\.com\/([^\/]+)\/(?:p|reel|tv)\//);
+            if (match && match[1] && match[1] !== 'www' && match[1] !== 'p') {
+                return match[1];
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
     }
 
     /**
