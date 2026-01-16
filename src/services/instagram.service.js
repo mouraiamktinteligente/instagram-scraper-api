@@ -553,9 +553,11 @@ class InstagramService {
             // Build proxy URL with embedded credentials if available
             let proxyServer = proxy.server;
             if (proxy.username && proxy.password) {
-                // Some proxies require credentials in the URL: http://user:pass@host:port
+                // URL-encode credentials to handle special characters like = @ :
+                const encodedUser = encodeURIComponent(proxy.username);
+                const encodedPass = encodeURIComponent(proxy.password);
                 const url = new URL(proxy.server);
-                proxyServer = `${url.protocol}//${proxy.username}:${proxy.password}@${url.host}`;
+                proxyServer = `${url.protocol}//${encodedUser}:${encodedPass}@${url.host}`;
             }
 
             launchOptions.proxy = {
