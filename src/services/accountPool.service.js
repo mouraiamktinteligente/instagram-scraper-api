@@ -73,6 +73,13 @@ class AccountPoolService {
             }
 
             logger.info(`AccountPool loaded ${this.accounts.length} accounts from database`);
+
+            // Debug: log accounts with TOTP
+            const accountsWithTOTP = this.accounts.filter(a => a.totpSecret);
+            logger.info(`[DEBUG] Accounts with TOTP secret: ${accountsWithTOTP.length}`);
+            if (accountsWithTOTP.length > 0) {
+                logger.info(`[DEBUG] TOTP accounts: ${accountsWithTOTP.map(a => a.username).join(', ')}`);
+            }
         } catch (error) {
             logger.error('Error loading accounts from database:', error.message);
             throw error;
