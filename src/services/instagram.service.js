@@ -787,17 +787,102 @@ class InstagramService {
     }
 
     /**
-     * Check if an object looks like a comment
+     * Check if an object looks like a real comment (not UI element)
      */
     looksLikeComment(obj) {
         if (!obj || typeof obj !== 'object') return false;
 
         // A comment typically has text and some form of ID
-        const hasText = !!(obj.text || obj.comment_text || obj.body);
+        const text = obj.text || obj.comment_text || obj.body || '';
+        const hasText = text && text.length > 0;
         const hasId = !!(obj.id || obj.pk || obj.comment_id || obj.node_id);
         const hasUser = !!(obj.user || obj.owner || obj.from || obj.username);
 
-        return hasText && (hasId || hasUser);
+        // Must have text and either ID or user info
+        if (!hasText || (!hasId && !hasUser)) return false;
+
+        // Filter out Instagram UI elements and menu items (false positives)
+        const commentId = String(obj.id || obj.pk || obj.comment_id || obj.node_id || '').toLowerCase();
+        const textLower = text.toLowerCase();
+
+        // Known UI element IDs to exclude
+        const uiElementIds = [
+            'snooze_suggested',
+            'dont_suggest',
+            'hide_suggested',
+            'not_interested',
+            'report',
+            'unfol',
+            'block',
+            'restrict',
+            'uncomfortable',
+            'feedback',
+            'about_this',
+            'why_seeing',
+            'cancel',
+            '_author',
+            '_posts',
+            '_from',
+            'suggested'
+        ];
+
+        for (const uiId of uiElementIds) {
+            if (commentId.includes(uiId)) {
+                return false; // This is a UI element, not a comment
+            }
+        }
+
+        // Known UI text patterns to exclude
+        const uiTextPatterns = [
+            'ativar modo soneca',
+            'não sugerir',
+            'ocultar sugerido',
+            'denunciar',
+            'bloquear',
+            'restringir',
+            'não me senti bem',
+            'escalar sem destruir',
+            'sobre esta conta',
+            'por que estou vendo',
+            'cancelar',
+            'add to favorites',
+            'go to post',
+            'embed',
+            'share to',
+            'copy link',
+            'hide like count',
+            'turn off commenting'
+        ];
+
+        for (const pattern of uiTextPatterns) {
+            if (textLower.includes(pattern)) {
+                return false; // This is UI text, not a comment
+            }
+        }
+
+        // Additional validation: real comments usually have certain properties
+        // Check for timestamp (created_at, created_time, taken_at, timestamp)
+        const hasTimestamp = !!(obj.created_at || obj.created_time || obj.taken_at || obj.timestamp || obj.created_at_utc);
+
+        // Real comments often have like counts
+        const hasLikes = obj.like_count !== undefined || obj.likes !== undefined || obj.comment_like_count !== undefined;
+
+        // If it looks like a comment structure (has timestamp or likes), it's more likely real
+        if (hasTimestamp || hasLikes) {
+            return true;
+        }
+
+        // If text is very short (emoji only) and has user, probably real comment
+        if (hasUser && text.length > 0 && text.length < 50) {
+            return true;
+        }
+
+        // Be more strict: require user info for longer texts
+        if (text.length > 50 && !hasUser) {
+            return false;
+        }
+
+        return hasUser; // Require user info as final check
     }
 
     /**
