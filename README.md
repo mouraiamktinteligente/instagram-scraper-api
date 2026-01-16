@@ -124,6 +124,7 @@ CREATE TABLE instagram_comments (
   post_id TEXT NOT NULL,
   post_url TEXT NOT NULL,
   comment_id TEXT UNIQUE NOT NULL,
+  parent_comment_id TEXT,  -- NULL se for comentário principal, ID do pai se for resposta
   text TEXT,
   created_at TIMESTAMPTZ,
   username TEXT,
@@ -136,6 +137,7 @@ CREATE TABLE instagram_comments (
 CREATE INDEX idx_comments_post_id ON instagram_comments(post_id);
 CREATE INDEX idx_comments_comment_id ON instagram_comments(comment_id);
 CREATE INDEX idx_comments_username ON instagram_comments(username);
+CREATE INDEX idx_comments_parent ON instagram_comments(parent_comment_id);
 ```
 
 ## 🔌 API Endpoints

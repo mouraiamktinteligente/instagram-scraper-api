@@ -754,8 +754,9 @@ class InstagramService {
     /**
      * Deep search for comments in any JSON structure
      * Uses recursive pattern matching to find comment-like objects
+     * Also extracts nested replies with parent_comment_id
      */
-    deepSearchForComments(obj, postId, postUrl, depth = 0) {
+    deepSearchForComments(obj, postId, postUrl, depth = 0, parentCommentId = null) {
         const comments = [];
         const maxDepth = 15;
 
@@ -764,7 +765,7 @@ class InstagramService {
         // If it's an array, search each element
         if (Array.isArray(obj)) {
             for (const item of obj) {
-                comments.push(...this.deepSearchForComments(item, postId, postUrl, depth + 1));
+                comments.push(...this.deepSearchForComments(item, postId, postUrl, depth + 1, parentCommentId));
             }
             return comments;
         }
@@ -774,32 +775,79 @@ class InstagramService {
 
         // Check if this object looks like a comment
         if (this.looksLikeComment(obj)) {
-            const parsed = parseComment(obj, postId, postUrl);
+            const parsed = parseComment(obj, postId, postUrl, parentCommentId);
             if (parsed && parsed.comment_id && parsed.text) {
                 comments.push(parsed);
+
+                // Extract replies/child comments
+                const replyContainers = [
+                    obj.edge_threaded_comments?.edges,
+                    obj.replies?.edges,
+                    obj.preview_child_comments,
+                    obj.child_comments,
+                    obj.child_comments?.edges
+                ];
+
+                for (const replies of replyContainers) {
+                    if (Array.isArray(replies) && replies.length > 0) {
+                        logger.debug(`[REPLIES] Found ${replies.length} replies for comment ${parsed.comment_id}`);
+                        for (const reply of replies) {
+                            const replyNode = reply.node || reply;
+                            if (this.looksLikeComment(replyNode)) {
+                                const replyParsed = parseComment(replyNode, postId, postUrl, parsed.comment_id);
+                                if (replyParsed && replyParsed.comment_id && replyParsed.text) {
+                                    comments.push(replyParsed);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
         // Also check for edge/node structures
         if (obj.node && this.looksLikeComment(obj.node)) {
-            const parsed = parseComment(obj.node, postId, postUrl);
+            const parsed = parseComment(obj.node, postId, postUrl, parentCommentId);
             if (parsed && parsed.comment_id && parsed.text) {
                 comments.push(parsed);
+
+                // Extract replies from node
+                const replyContainers = [
+                    obj.node.edge_threaded_comments?.edges,
+                    obj.node.replies?.edges,
+                    obj.node.preview_child_comments,
+                    obj.node.child_comments
+                ];
+
+                for (const replies of replyContainers) {
+                    if (Array.isArray(replies) && replies.length > 0) {
+                        logger.debug(`[REPLIES] Found ${replies.length} replies for node comment ${parsed.comment_id}`);
+                        for (const reply of replies) {
+                            const replyNode = reply.node || reply;
+                            if (this.looksLikeComment(replyNode)) {
+                                const replyParsed = parseComment(replyNode, postId, postUrl, parsed.comment_id);
+                                if (replyParsed && replyParsed.comment_id && replyParsed.text) {
+                                    comments.push(replyParsed);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Recursively search all object properties
+        // Recursively search all object properties (but skip reply containers we already processed)
         for (const key of Object.keys(obj)) {
-            // Skip properties that are unlikely to contain comments
-            if (['extensions', 'headers', 'request_id', 'trace_id'].includes(key)) continue;
+            // Skip properties that are unlikely to contain comments or already processed
+            if (['extensions', 'headers', 'request_id', 'trace_id', 'edge_threaded_comments', 'preview_child_comments', 'child_comments'].includes(key)) continue;
 
             // Prioritize properties that likely contain comments
             const priorityKeys = ['edges', 'comments', 'comment', 'nodes', 'items', 'data', 'threads'];
 
             if (priorityKeys.includes(key) || key.includes('comment')) {
-                comments.push(...this.deepSearchForComments(obj[key], postId, postUrl, depth + 1));
+                comments.push(...this.deepSearchForComments(obj[key], postId, postUrl, depth + 1, null));
             } else if (typeof obj[key] === 'object') {
-                comments.push(...this.deepSearchForComments(obj[key], postId, postUrl, depth + 1));
+                comments.push(...this.deepSearchForComments(obj[key], postId, postUrl, depth + 1, null));
             }
         }
 

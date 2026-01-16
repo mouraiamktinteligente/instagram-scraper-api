@@ -96,9 +96,10 @@ function normalizeInstagramUrl(url) {
  * @param {Object} node - Comment node from GraphQL
  * @param {string} postId - Parent post ID
  * @param {string} postUrl - Parent post URL
+ * @param {string} parentCommentId - ID of parent comment if this is a reply (optional)
  * @returns {Object} Parsed comment object
  */
-function parseComment(node, postId, postUrl) {
+function parseComment(node, postId, postUrl, parentCommentId = null) {
     try {
         // Support both 'owner' and 'user' object structures
         const owner = node.owner || node.user || {};
@@ -121,16 +122,25 @@ function parseComment(node, postId, postUrl) {
             createdAt = new Date().toISOString();
         }
 
+        // Extract like count from various structures
+        const likeCount =
+            node.edge_liked_by?.count ||
+            node.like_count ||
+            node.comment_like_count ||
+            node.likes_count ||
+            0;
+
         return {
             post_id: postId,
             post_url: postUrl,
             comment_id: String(commentId),
+            parent_comment_id: parentCommentId ? String(parentCommentId) : null,
             text: node.text || node.comment_text || '',
             created_at: createdAt,
             username: owner.username || node.username || '',
             user_id: String(owner.id || owner.pk || node.user_id || ''),
             profile_pic_url: owner.profile_pic_url || node.profile_pic_url || '',
-            like_count: node.edge_liked_by?.count || node.like_count || node.comment_like_count || 0,
+            like_count: likeCount,
         };
     } catch (error) {
         return null;
