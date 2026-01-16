@@ -703,12 +703,32 @@ class InstagramService {
                 const urlShort = url.split('?')[0].substring(url.indexOf('instagram.com') + 13);
                 logger.debug(`[INTERCEPT] API #${apiCallCount}: ${urlShort}`);
 
+                // Log response structure keys for debugging
+                const topKeys = Object.keys(data || {});
+                const dataKeys = data?.data ? Object.keys(data.data) : [];
+                logger.info(`[INTERCEPT] API #${apiCallCount} structure: top=[${topKeys.join(',')}] data=[${dataKeys.join(',')}]`);
+
+                // If this looks like a comment-related response, log more details
+                const jsonStr = JSON.stringify(data).substring(0, 500);
+                if (jsonStr.includes('comment') || jsonStr.includes('edge_media')) {
+                    logger.info(`[INTERCEPT] 📝 Potential comment data in API #${apiCallCount}`);
+                    // Log first comment-like object structure if found
+                    const samplePath = this.findCommentPath(data);
+                    if (samplePath) {
+                        logger.info(`[INTERCEPT] Comment path found: ${samplePath}`);
+                    }
+                }
+
                 // Deep search for comments in the response
                 const extractedComments = this.deepSearchForComments(data, postId, postUrl);
 
                 if (extractedComments.length > 0) {
                     commentApiCalls++;
                     logger.info(`[INTERCEPT] 🎯 Found ${extractedComments.length} comments in API call #${apiCallCount}`);
+
+                    // Log sample comment for debugging
+                    const sample = extractedComments[0];
+                    logger.info(`[INTERCEPT] Sample comment: id=${sample.comment_id}, text="${sample.text?.substring(0, 30)}...", user=${sample.username}`);
 
                     // Add unique comments only
                     const existingIds = new Set(comments.map(c => c.comment_id));
@@ -784,6 +804,34 @@ class InstagramService {
         }
 
         return comments;
+    }
+
+    /**
+     * Find the path to comment data in the response (for debugging)
+     */
+    findCommentPath(obj, path = '', depth = 0) {
+        if (depth > 10 || !obj) return null;
+
+        if (typeof obj !== 'object') return null;
+
+        // Check for comment-related key names
+        const commentKeys = ['edge_media_to_comment', 'edge_media_to_parent_comment', 'comments', 'comment_list'];
+
+        for (const key of Object.keys(obj)) {
+            if (commentKeys.some(ck => key.includes(ck))) {
+                const value = obj[key];
+                if (value && (value.edges || value.length > 0 || value.count !== undefined)) {
+                    return `${path}.${key}`;
+                }
+            }
+
+            if (typeof obj[key] === 'object' && !Array.isArray(obj[key])) {
+                const result = this.findCommentPath(obj[key], `${path}.${key}`, depth + 1);
+                if (result) return result;
+            }
+        }
+
+        return null;
     }
 
     /**
