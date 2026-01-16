@@ -1,99 +1,33 @@
 /**
  * Account Pool Service
  * Manages multiple Instagram accounts for scraping with rotation and health monitoring
+ * Loads accounts from Supabase database
  */
 
-const fs = require('fs');
-const path = require('path');
+const { createClient } = require('@supabase/supabase-js');
 const config = require('../config');
 const logger = require('../utils/logger');
-
-// Session storage directory
-const SESSIONS_DIR = process.env.SESSIONS_DIR || '/data/sessions';
 
 class AccountPoolService {
     constructor() {
         this.accounts = [];
         this.currentIndex = 0;
-        this.accountStatus = new Map(); // username -> { status: 'active'|'banned'|'error', lastUsed, errorCount }
+        this.accountStatus = new Map();
         this.initialized = false;
+
+        // Initialize Supabase client
+        this.supabase = createClient(config.supabase.url, config.supabase.key);
     }
 
     /**
-     * Initialize the account pool from environment variable
-     * Format: INSTAGRAM_ACCOUNTS=[{"username":"user1","password":"pass1"},...]
+     * Initialize the account pool from Supabase database
      */
-    initialize() {
+    async initialize() {
         if (this.initialized) return;
 
         try {
-            const accountsJson = process.env.INSTAGRAM_ACCOUNTS || '[]';
-
-            // Log for debugging
-            logger.debug('Raw INSTAGRAM_ACCOUNTS value:', accountsJson.substring(0, 100));
-
-            let parsed;
-            try {
-                parsed = JSON.parse(accountsJson);
-            } catch (parseError) {
-                logger.error('Failed to parse INSTAGRAM_ACCOUNTS JSON:', parseError.message);
-                logger.error('Value received:', accountsJson.substring(0, 200));
-                this.accounts = [];
-                this.initialized = true;
-                return;
-            }
-
-            // Ensure it's an array
-            if (!Array.isArray(parsed)) {
-                logger.error('INSTAGRAM_ACCOUNTS must be a JSON array, got:', typeof parsed);
-                this.accounts = [];
-                this.initialized = true;
-                return;
-            }
-
-            this.accounts = parsed;
-
-            if (this.accounts.length === 0) {
-                logger.warn('No Instagram accounts configured. Add INSTAGRAM_ACCOUNTS env variable.');
-                this.initialized = true;
-                return;
-            }
-
-            // Validate each account
-            this.accounts = this.accounts.filter((acc, index) => {
-                if (!acc || typeof acc !== 'object') {
-                    logger.warn(`Account at index ${index} is not an object, skipping`);
-                    return false;
-                }
-                if (!acc.username || !acc.password) {
-                    logger.warn(`Account at index ${index} missing username or password, skipping`);
-                    return false;
-                }
-                return true;
-            });
-
-            // Initialize status for each account
-            for (const acc of this.accounts) {
-                this.accountStatus.set(acc.username, {
-                    status: 'active',
-                    lastUsed: null,
-                    errorCount: 0,
-                    lastError: null
-                });
-            }
-
-            // Ensure sessions directory exists
-            try {
-                if (!fs.existsSync(SESSIONS_DIR)) {
-                    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-                }
-            } catch (fsError) {
-                logger.warn('Could not create sessions directory:', fsError.message);
-            }
-
+            await this.loadAccountsFromDatabase();
             this.initialized = true;
-            logger.info(`AccountPool initialized with ${this.accounts.length} accounts`);
-
         } catch (error) {
             logger.error('Error initializing account pool:', error.message);
             this.accounts = [];
@@ -102,9 +36,58 @@ class AccountPoolService {
     }
 
     /**
+     * Load accounts from Supabase database
+     */
+    async loadAccountsFromDatabase() {
+        try {
+            const { data, error } = await this.supabase
+                .from('instagram_accounts')
+                .select('*')
+                .eq('is_active', true)
+                .eq('is_banned', false)
+                .order('created_at', { ascending: true });
+
+            if (error) {
+                throw error;
+            }
+
+            this.accounts = (data || []).map(row => ({
+                id: row.id,
+                username: row.username,
+                password: row.password,
+                sessionData: row.session_data,
+            }));
+
+            // Initialize status for each account
+            this.accountStatus.clear();
+
+            for (const acc of this.accounts) {
+                this.accountStatus.set(acc.username, {
+                    dbId: acc.id,
+                    status: 'active',
+                    lastUsed: null,
+                    errorCount: 0,
+                    lastError: null
+                });
+            }
+
+            logger.info(`AccountPool loaded ${this.accounts.length} accounts from database`);
+        } catch (error) {
+            logger.error('Error loading accounts from database:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Reload accounts from database
+     */
+    async reloadAccounts() {
+        this.initialized = false;
+        await this.initialize();
+    }
+
+    /**
      * Get the next available account using round-robin rotation
-     * Skips banned accounts
-     * @returns {Object|null} Account object with username, password, sessionPath
      */
     getNextAccount() {
         if (this.accounts.length === 0) {
@@ -119,28 +102,22 @@ class AccountPoolService {
             const account = this.accounts[this.currentIndex];
             const status = this.accountStatus.get(account.username);
 
-            // Move to next index
             this.currentIndex = (this.currentIndex + 1) % this.accounts.length;
             attempts++;
 
-            // Skip banned accounts
             if (status.status === 'banned') {
                 logger.debug(`Skipping banned account: ${account.username}`);
                 continue;
             }
 
-            // Return account with session path
-            const sessionPath = path.join(SESSIONS_DIR, `${account.username}.json`);
-
-            // Update last used
             status.lastUsed = new Date();
-
             logger.debug(`Using account: ${account.username}`);
 
             return {
+                id: account.id,
                 username: account.username,
                 password: account.password,
-                sessionPath
+                sessionData: account.sessionData
             };
         }
 
@@ -149,19 +126,15 @@ class AccountPoolService {
     }
 
     /**
-     * Mark an account as having an error
-     * After 3 consecutive errors, marks as banned
-     * @param {string} username 
-     * @param {string} error 
+     * Report error for an account
      */
-    reportError(username, error) {
+    async reportError(username, error) {
         const status = this.accountStatus.get(username);
         if (!status) return;
 
         status.errorCount++;
         status.lastError = error;
 
-        // Check for ban indicators in error message
         const banIndicators = [
             'login_required',
             'checkpoint_required',
@@ -178,55 +151,106 @@ class AccountPoolService {
         if (isBan || status.errorCount >= 3) {
             status.status = 'banned';
             logger.warn(`Account ${username} marked as banned: ${error}`);
+
+            // Update database
+            try {
+                await this.supabase
+                    .from('instagram_accounts')
+                    .update({
+                        is_banned: true,
+                        fail_count: status.errorCount
+                    })
+                    .eq('id', status.dbId);
+            } catch (e) {
+                logger.debug('Failed to update account ban status in DB:', e.message);
+            }
+        } else {
+            // Just update fail count
+            try {
+                await this.supabase
+                    .from('instagram_accounts')
+                    .update({ fail_count: status.errorCount })
+                    .eq('id', status.dbId);
+            } catch (e) {
+                logger.debug('Failed to update account fail_count in DB:', e.message);
+            }
         }
     }
 
     /**
-     * Mark an account as successfully used (reset error count)
-     * @param {string} username 
+     * Report success for an account
      */
-    reportSuccess(username) {
+    async reportSuccess(username) {
         const status = this.accountStatus.get(username);
         if (!status) return;
 
         status.errorCount = 0;
         status.lastError = null;
         status.status = 'active';
+
+        // Update database
+        try {
+            await this.supabase
+                .from('instagram_accounts')
+                .update({
+                    fail_count: 0,
+                    last_login_at: new Date().toISOString()
+                })
+                .eq('id', status.dbId);
+        } catch (e) {
+            logger.debug('Failed to update account success in DB:', e.message);
+        }
     }
 
     /**
-     * Check if an account has a saved session
-     * @param {string} username 
-     * @returns {boolean}
+     * Save session data to database
      */
-    hasSession(username) {
-        const sessionPath = path.join(SESSIONS_DIR, `${username}.json`);
-        return fs.existsSync(sessionPath);
+    async saveSession(username, cookies) {
+        const status = this.accountStatus.get(username);
+        if (!status) {
+            logger.warn(`Cannot save session: account ${username} not found in pool`);
+            return;
+        }
+
+        try {
+            await this.supabase
+                .from('instagram_accounts')
+                .update({ session_data: cookies })
+                .eq('id', status.dbId);
+
+            logger.info(`Session saved to database for ${username}`);
+        } catch (error) {
+            logger.error(`Failed to save session for ${username}:`, error.message);
+        }
     }
 
     /**
-     * Save session cookies for an account
-     * @param {string} username 
-     * @param {Array} cookies 
+     * Load session data from database
      */
-    saveSession(username, cookies) {
-        const sessionPath = path.join(SESSIONS_DIR, `${username}.json`);
-        fs.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
-        logger.info(`Session saved for ${username}`);
-    }
-
-    /**
-     * Load session cookies for an account
-     * @param {string} username 
-     * @returns {Array|null}
-     */
-    loadSession(username) {
-        const sessionPath = path.join(SESSIONS_DIR, `${username}.json`);
-        if (!fs.existsSync(sessionPath)) {
+    async loadSession(username) {
+        const account = this.accounts.find(acc => acc.username === username);
+        if (!account) {
             return null;
         }
+
+        // Session is already loaded in account object
+        if (account.sessionData && Array.isArray(account.sessionData)) {
+            return account.sessionData;
+        }
+
+        // Reload from database if not present
         try {
-            return JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+            const { data, error } = await this.supabase
+                .from('instagram_accounts')
+                .select('session_data')
+                .eq('username', username)
+                .single();
+
+            if (error || !data?.session_data) {
+                return null;
+            }
+
+            return data.session_data;
         } catch (error) {
             logger.warn(`Error loading session for ${username}:`, error.message);
             return null;
@@ -234,11 +258,17 @@ class AccountPoolService {
     }
 
     /**
+     * Check if account has session data
+     */
+    hasSession(username) {
+        const account = this.accounts.find(acc => acc.username === username);
+        return account?.sessionData && Array.isArray(account.sessionData) && account.sessionData.length > 0;
+    }
+
+    /**
      * Get pool status summary
-     * @returns {Object}
      */
     getStatus() {
-        // Ensure accounts is always an array
         if (!Array.isArray(this.accounts)) {
             this.accounts = [];
         }
@@ -271,22 +301,34 @@ class AccountPoolService {
     }
 
     /**
-     * Manually reset a banned account
-     * @param {string} username 
+     * Reset a banned account
      */
-    resetAccount(username) {
+    async resetAccount(username) {
         const status = this.accountStatus.get(username);
         if (status) {
             status.status = 'active';
             status.errorCount = 0;
             status.lastError = null;
+
+            // Update database
+            try {
+                await this.supabase
+                    .from('instagram_accounts')
+                    .update({
+                        is_banned: false,
+                        fail_count: 0
+                    })
+                    .eq('id', status.dbId);
+            } catch (e) {
+                logger.debug('Failed to reset account in DB:', e.message);
+            }
+
             logger.info(`Account ${username} reset to active`);
         }
     }
 
     /**
      * Get count of active accounts
-     * @returns {number}
      */
     getActiveCount() {
         let count = 0;

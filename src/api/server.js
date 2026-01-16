@@ -458,10 +458,10 @@ const server = app.listen(PORT, () => {
     logger.info(`Environment: ${config.env}`);
     logger.info(`Proxies configured: ${proxyService.getProxyCount()}`);
 
-    // Initialize workers after server is running
-    setTimeout(() => {
+    // Initialize workers after server is running (async for database loading)
+    setTimeout(async () => {
         try {
-            worker.initializeQueues();
+            await worker.initializeQueues();
             logger.info('Workers initialized successfully');
         } catch (e) {
             logger.error('Error initializing workers:', e.message);

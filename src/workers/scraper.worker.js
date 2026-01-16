@@ -32,13 +32,16 @@ let initialized = false;
 
 /**
  * Initialize queues (lazy initialization)
+ * Now async to load proxies from database
  */
-function initializeQueues() {
+async function initializeQueues() {
     if (initialized) return queues;
 
     logger.info('Initializing Bull queues...');
     queues = [];
 
+    // Initialize proxy service from database
+    await proxyService.initialize();
     const proxies = proxyService.getAllProxies();
 
     if (proxies.length === 0) {
@@ -186,8 +189,8 @@ function createQueue(name, proxy, index) {
 let currentQueueIndex = 0;
 
 async function addJob(postUrl, jobId) {
-    // Ensure queues are initialized
-    const activeQueues = initializeQueues();
+    // Ensure queues are initialized (loads proxies from database)
+    const activeQueues = await initializeQueues();
 
     // Select queue (round-robin across available proxies)
     const queue = activeQueues[currentQueueIndex];

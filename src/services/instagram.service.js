@@ -19,8 +19,16 @@ const {
 // Initialize Supabase client
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
-// Initialize account pool
-accountPool.initialize();
+// Services will be initialized async before first use
+let servicesInitialized = false;
+
+async function initializeServices() {
+    if (servicesInitialized) return;
+
+    await accountPool.initialize();
+    servicesInitialized = true;
+    logger.info('Instagram services initialized');
+}
 
 class InstagramService {
     constructor() {
@@ -38,6 +46,9 @@ class InstagramService {
         if (!postId) {
             throw new Error('Invalid Instagram post URL');
         }
+
+        // Ensure services are initialized (loads from database)
+        await initializeServices();
 
         logger.info('[SCRAPE] Starting comment scrape', { postId, postUrl });
 
@@ -498,7 +509,7 @@ class InstagramService {
             if (isLoggedIn) {
                 // Save session cookies
                 const cookies = await context.cookies();
-                accountPool.saveSession(account.username, cookies);
+                await accountPool.saveSession(account.username, cookies);
                 logger.info(`[LOGIN] ✅ Login successful for ${account.username}`);
                 await page.close();
                 return true;

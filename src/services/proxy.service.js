@@ -1,35 +1,96 @@
 /**
  * Proxy Service
  * Manages proxy rotation for distributed scraping
+ * Loads proxies from Supabase database
  */
 
+const { createClient } = require('@supabase/supabase-js');
 const config = require('../config');
 const logger = require('../utils/logger');
 
 class ProxyService {
     constructor() {
-        this.proxies = config.proxies;
+        this.proxies = [];
+        this.proxyMap = new Map(); // Map DB id to proxy data
         this.currentIndex = 0;
-        this.proxyStats = new Map(); // Track success/failure per proxy
+        this.proxyStats = new Map();
+        this.initialized = false;
 
-        // Initialize stats for each proxy
-        this.proxies.forEach((proxy, index) => {
-            this.proxyStats.set(index, {
-                requests: 0,
-                successes: 0,
-                failures: 0,
-                lastUsed: null,
-                blocked: false,
+        // Initialize Supabase client
+        this.supabase = createClient(config.supabase.url, config.supabase.key);
+    }
+
+    /**
+     * Initialize service by loading proxies from database
+     */
+    async initialize() {
+        if (this.initialized) return;
+
+        try {
+            await this.loadProxiesFromDatabase();
+            this.initialized = true;
+        } catch (error) {
+            logger.error('Failed to initialize ProxyService:', error.message);
+            // Fall back to empty proxies
+            this.proxies = [];
+        }
+    }
+
+    /**
+     * Load proxies from Supabase database
+     */
+    async loadProxiesFromDatabase() {
+        try {
+            const { data, error } = await this.supabase
+                .from('instagram_proxies')
+                .select('*')
+                .eq('is_active', true)
+                .order('created_at', { ascending: true });
+
+            if (error) {
+                throw error;
+            }
+
+            this.proxies = (data || []).map(row => ({
+                id: row.id,
+                server: row.server,
+                username: row.username,
+                password: row.password,
+            }));
+
+            // Initialize stats for each proxy
+            this.proxyMap.clear();
+            this.proxyStats.clear();
+
+            this.proxies.forEach((proxy, index) => {
+                this.proxyMap.set(proxy.id, { proxy, index });
+                this.proxyStats.set(index, {
+                    dbId: proxy.id,
+                    requests: 0,
+                    successes: 0,
+                    failures: 0,
+                    lastUsed: null,
+                    blocked: false,
+                });
             });
-        });
 
-        logger.info(`ProxyService initialized with ${this.proxies.length} proxies`);
+            logger.info(`ProxyService loaded ${this.proxies.length} proxies from database`);
+        } catch (error) {
+            logger.error('Error loading proxies from database:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Reload proxies from database (can be called to refresh)
+     */
+    async reloadProxies() {
+        this.initialized = false;
+        await this.initialize();
     }
 
     /**
      * Get the next proxy in rotation
-     * Skips blocked proxies
-     * @returns {Object|null} Proxy configuration or null if none available
      */
     getNextProxy() {
         if (this.proxies.length === 0) {
@@ -37,7 +98,6 @@ class ProxyService {
             return null;
         }
 
-        // Find next non-blocked proxy
         const startIndex = this.currentIndex;
         let attempts = 0;
 
@@ -45,7 +105,6 @@ class ProxyService {
             const proxy = this.proxies[this.currentIndex];
             const stats = this.proxyStats.get(this.currentIndex);
 
-            // Move to next index for next call
             this.currentIndex = (this.currentIndex + 1) % this.proxies.length;
             attempts++;
 
@@ -60,7 +119,6 @@ class ProxyService {
             }
         }
 
-        // All proxies are blocked, reset and try again
         logger.warn('All proxies are blocked, resetting...');
         this.resetAllProxies();
 
@@ -75,7 +133,6 @@ class ProxyService {
 
     /**
      * Get all configured proxies
-     * @returns {Array} Array of proxy configurations
      */
     getAllProxies() {
         return this.proxies.map((proxy, index) => ({
@@ -87,14 +144,11 @@ class ProxyService {
 
     /**
      * Get proxy by index
-     * @param {number} index - Proxy index
-     * @returns {Object|null} Proxy configuration
      */
     getProxyByIndex(index) {
         if (index < 0 || index >= this.proxies.length) {
             return null;
         }
-
         return {
             ...this.proxies[index],
             index,
@@ -103,28 +157,37 @@ class ProxyService {
 
     /**
      * Report successful request for a proxy
-     * @param {number} proxyIndex - Index of the proxy
      */
-    reportSuccess(proxyIndex) {
+    async reportSuccess(proxyIndex) {
         const stats = this.proxyStats.get(proxyIndex);
         if (stats) {
             stats.successes++;
-            stats.blocked = false; // Unblock on success
+            stats.blocked = false;
             logger.debug(`Proxy ${proxyIndex} success (total: ${stats.successes})`);
+
+            // Update last_used_at in database
+            try {
+                await this.supabase
+                    .from('instagram_proxies')
+                    .update({
+                        last_used_at: new Date().toISOString(),
+                        fail_count: 0
+                    })
+                    .eq('id', stats.dbId);
+            } catch (e) {
+                logger.debug('Failed to update proxy stats in DB:', e.message);
+            }
         }
     }
 
     /**
      * Report failed request for a proxy
-     * @param {number} proxyIndex - Index of the proxy
-     * @param {string} reason - Failure reason
      */
-    reportFailure(proxyIndex, reason = 'unknown') {
+    async reportFailure(proxyIndex, reason = 'unknown') {
         const stats = this.proxyStats.get(proxyIndex);
         if (stats) {
             stats.failures++;
 
-            // Block proxy after 3 consecutive failures
             const failureRate = stats.failures / (stats.requests || 1);
             if (failureRate > 0.5 && stats.requests >= 3) {
                 stats.blocked = true;
@@ -134,11 +197,21 @@ class ProxyService {
                     reason,
                 });
             }
+
+            // Update fail_count in database
+            try {
+                await this.supabase
+                    .from('instagram_proxies')
+                    .update({ fail_count: stats.failures })
+                    .eq('id', stats.dbId);
+            } catch (e) {
+                logger.debug('Failed to update proxy fail_count in DB:', e.message);
+            }
         }
     }
 
     /**
-     * Reset all proxy stats and unblock them
+     * Reset all proxy stats
      */
     resetAllProxies() {
         this.proxyStats.forEach((stats, index) => {
@@ -153,7 +226,6 @@ class ProxyService {
 
     /**
      * Get proxy count
-     * @returns {number} Number of configured proxies
      */
     getProxyCount() {
         return this.proxies.length;
@@ -161,7 +233,6 @@ class ProxyService {
 
     /**
      * Get available (non-blocked) proxy count
-     * @returns {number} Number of available proxies
      */
     getAvailableProxyCount() {
         let available = 0;
@@ -173,7 +244,6 @@ class ProxyService {
 
     /**
      * Get proxy statistics
-     * @returns {Object} Aggregated statistics
      */
     getStats() {
         let totalRequests = 0;
@@ -203,4 +273,5 @@ class ProxyService {
 }
 
 // Export singleton instance
-module.exports = new ProxyService();
+const proxyService = new ProxyService();
+module.exports = proxyService;
