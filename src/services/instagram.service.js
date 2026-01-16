@@ -550,11 +550,19 @@ class InstagramService {
         };
 
         if (proxy && proxy.server) {
+            // Build proxy URL with embedded credentials if available
+            let proxyServer = proxy.server;
+            if (proxy.username && proxy.password) {
+                // Some proxies require credentials in the URL: http://user:pass@host:port
+                const url = new URL(proxy.server);
+                proxyServer = `${url.protocol}//${proxy.username}:${proxy.password}@${url.host}`;
+            }
+
             launchOptions.proxy = {
-                server: proxy.server,
-                username: proxy.username,
-                password: proxy.password,
+                server: proxyServer,
             };
+
+            logger.info('[BROWSER] Using proxy:', { server: proxyServer.replace(/:[^:@]+@/, ':***@') });
         }
 
         logger.info('[BROWSER] Launching Firefox browser...');
