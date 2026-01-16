@@ -53,7 +53,9 @@ class ProxyService {
 
             this.proxies = (data || []).map(row => ({
                 id: row.id,
-                server: row.server,
+                server: `${row.host}:${row.port}`,  // Concatenate host:port
+                host: row.host,
+                port: row.port,
                 username: row.username,
                 password: row.password,
             }));
