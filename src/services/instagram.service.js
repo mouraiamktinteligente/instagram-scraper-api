@@ -790,14 +790,40 @@ class InstagramService {
      * @param {string} postUrl
      */
     async navigateToPost(page, postUrl) {
-        logger.debug('Navigating to post', { postUrl });
+        logger.info('[SCRAPE] Navigating to post:', postUrl);
 
         await page.goto(postUrl, {
-            waitUntil: 'networkidle',
+            waitUntil: 'domcontentloaded',
             timeout: config.scraping.pageTimeout,
         });
 
-        await randomDelay(2000, 4000);
+        // Wait for JavaScript to render content
+        logger.info('[SCRAPE] Waiting for post content to render...');
+        try {
+            await page.waitForFunction(() => {
+                return document.querySelector('article') !== null ||
+                    document.querySelectorAll('img').length > 2 ||
+                    document.body.innerText.length > 500;
+            }, { timeout: 30000 });
+            logger.info('[SCRAPE] Post content rendered');
+        } catch (e) {
+            logger.warn('[SCRAPE] Timeout waiting for post content, continuing...');
+        }
+
+        // Wait for network to settle
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+        // Log current page state
+        const pageInfo = await page.evaluate(() => ({
+            url: window.location.href,
+            title: document.title,
+            hasArticle: !!document.querySelector('article'),
+            imgCount: document.querySelectorAll('img').length,
+            textLength: document.body?.innerText?.length || 0
+        }));
+        logger.info('[SCRAPE] Post page state:', pageInfo);
+
+        await randomDelay(3000, 5000);
     }
 
     /**
