@@ -671,42 +671,133 @@ class InstagramService {
      * @param {string} postUrl
      */
     setupInterception(page, comments, postId, postUrl) {
+        // Counter for API calls
+        let apiCallCount = 0;
+        let commentApiCalls = 0;
+
         page.on('response', async (response) => {
             const url = response.url();
+            const status = response.status();
 
-            // Check for GraphQL/API endpoints that might contain comments
-            const isLikelyCommentsApi =
+            // Skip non-success responses
+            if (status < 200 || status >= 300) return;
+
+            // Check for any API/GraphQL endpoints
+            const isApiCall =
                 url.includes('/graphql') ||
-                url.includes('/api/graphql') ||
-                url.includes('/graphql/query') ||
-                url.includes('/api/v1/media') ||
-                url.includes('/comments');
+                url.includes('/api/') ||
+                url.includes('/web/') ||
+                url.includes('query') ||
+                url.includes('/v1/');
 
-            if (isLikelyCommentsApi) {
-                try {
-                    // Relaxed content-type check
-                    const ct = (response.headers()['content-type'] || '').toLowerCase();
-                    if (!(ct.includes('json') || url.includes('graphql'))) return;
+            if (!isApiCall) return;
 
-                    // Log for debugging
-                    logger.debug('Intercepted API response', { url: url.substring(0, 100) });
+            try {
+                const ct = (response.headers()['content-type'] || '').toLowerCase();
+                if (!ct.includes('json') && !url.includes('graphql')) return;
 
-                    const data = await response.json();
+                apiCallCount++;
+                const data = await response.json();
 
-                    // Extract comments from various response structures
-                    const extractedComments = this.extractCommentsFromResponse(data, postId, postUrl);
+                // Log summary of API call for debugging
+                const urlShort = url.split('?')[0].substring(url.indexOf('instagram.com') + 13);
+                logger.debug(`[INTERCEPT] API #${apiCallCount}: ${urlShort}`);
 
-                    if (extractedComments.length > 0) {
-                        logger.debug(`Extracted ${extractedComments.length} comments from response`);
+                // Deep search for comments in the response
+                const extractedComments = this.deepSearchForComments(data, postId, postUrl);
+
+                if (extractedComments.length > 0) {
+                    commentApiCalls++;
+                    logger.info(`[INTERCEPT] 🎯 Found ${extractedComments.length} comments in API call #${apiCallCount}`);
+
+                    // Add unique comments only
+                    const existingIds = new Set(comments.map(c => c.comment_id));
+                    for (const comment of extractedComments) {
+                        if (!existingIds.has(comment.comment_id)) {
+                            comments.push(comment);
+                            existingIds.add(comment.comment_id);
+                        }
                     }
 
-                    comments.push(...extractedComments);
-
-                } catch (e) {
-                    // Ignore parsing errors - not all responses are JSON
+                    logger.info(`[INTERCEPT] Total unique comments: ${comments.length}`);
                 }
+
+            } catch (e) {
+                // Ignore parsing errors
             }
         });
+
+        // Log interception setup
+        logger.info('[INTERCEPT] GraphQL/API interception enabled');
+    }
+
+    /**
+     * Deep search for comments in any JSON structure
+     * Uses recursive pattern matching to find comment-like objects
+     */
+    deepSearchForComments(obj, postId, postUrl, depth = 0) {
+        const comments = [];
+        const maxDepth = 15;
+
+        if (depth > maxDepth || !obj) return comments;
+
+        // If it's an array, search each element
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                comments.push(...this.deepSearchForComments(item, postId, postUrl, depth + 1));
+            }
+            return comments;
+        }
+
+        // If it's not an object, skip
+        if (typeof obj !== 'object') return comments;
+
+        // Check if this object looks like a comment
+        if (this.looksLikeComment(obj)) {
+            const parsed = parseComment(obj, postId, postUrl);
+            if (parsed && parsed.comment_id && parsed.text) {
+                comments.push(parsed);
+            }
+        }
+
+        // Also check for edge/node structures
+        if (obj.node && this.looksLikeComment(obj.node)) {
+            const parsed = parseComment(obj.node, postId, postUrl);
+            if (parsed && parsed.comment_id && parsed.text) {
+                comments.push(parsed);
+            }
+        }
+
+        // Recursively search all object properties
+        for (const key of Object.keys(obj)) {
+            // Skip properties that are unlikely to contain comments
+            if (['extensions', 'headers', 'request_id', 'trace_id'].includes(key)) continue;
+
+            // Prioritize properties that likely contain comments
+            const priorityKeys = ['edges', 'comments', 'comment', 'nodes', 'items', 'data', 'threads'];
+
+            if (priorityKeys.includes(key) || key.includes('comment')) {
+                comments.push(...this.deepSearchForComments(obj[key], postId, postUrl, depth + 1));
+            } else if (typeof obj[key] === 'object') {
+                comments.push(...this.deepSearchForComments(obj[key], postId, postUrl, depth + 1));
+            }
+        }
+
+        return comments;
+    }
+
+    /**
+     * Check if an object looks like a comment
+     */
+    looksLikeComment(obj) {
+        if (!obj || typeof obj !== 'object') return false;
+
+        // A comment typically has text and some form of ID
+        const hasText = !!(obj.text || obj.comment_text || obj.body);
+        const hasId = !!(obj.id || obj.pk || obj.comment_id || obj.node_id);
+        const hasUser = !!(obj.user || obj.owner || obj.from || obj.username);
+
+        return hasText && (hasId || hasUser);
     }
 
     /**
@@ -867,41 +958,73 @@ class InstagramService {
      * @param {Page} page
      */
     async scrollForMoreComments(page) {
-        const maxScrolls = config.scraping.maxScrolls || 10;
+        const maxScrolls = config.scraping.maxScrolls || 15;
+        let totalClicks = 0;
+
+        logger.info(`[SCRAPE] Starting scroll/click for more comments (max ${maxScrolls} iterations)...`);
 
         for (let i = 0; i < maxScrolls; i++) {
-            // Look for "Load more comments" button
-            const loadMoreButtons = [
-                'button:has-text("View more comments")',
-                'button:has-text("Ver mais comentários")',
-                'button:has-text("Load more")',
+            // Look for "Load more comments" or "View all comments" buttons/links
+            const loadMoreSelectors = [
+                // English
                 'span:has-text("View all")',
+                'button:has-text("View more comments")',
+                'button:has-text("Load more")',
+                'a:has-text("View all")',
+                // Portuguese
+                'span:has-text("Ver todos")',
+                'button:has-text("Ver mais comentários")',
+                'span:has-text("Ver mais")',
+                'a:has-text("Ver todos")',
+                // Generic - hidden comment expanders
+                'ul li button',
+                'div[role="button"]:has-text("+")',
             ];
 
             let clicked = false;
-            for (const selector of loadMoreButtons) {
+            for (const selector of loadMoreSelectors) {
                 try {
-                    const button = await page.$(selector);
-                    if (button) {
-                        await button.click();
-                        clicked = true;
-                        await randomDelay(1500, 3000);
-                        break;
+                    const buttons = await page.$$(selector);
+                    for (const button of buttons) {
+                        const isVisible = await button.isVisible().catch(() => false);
+                        if (isVisible) {
+                            await button.click().catch(() => { });
+                            clicked = true;
+                            totalClicks++;
+                            await randomDelay(2000, 3500);
+                            break;
+                        }
                     }
+                    if (clicked) break;
                 } catch (e) {
                     // Button not found or not clickable
                 }
             }
 
-            // Also scroll the page
-            await page.evaluate(() => window.scrollBy(0, 300));
-            await randomDelay(1000, 2000);
+            // Scroll within article/main content
+            await page.evaluate(() => {
+                const article = document.querySelector('article');
+                if (article) {
+                    article.scrollTop += 500;
+                }
+                window.scrollBy(0, 400);
+            });
 
-            // If no load more button found for 3 iterations, stop
-            if (!clicked && i >= 3) {
+            await randomDelay(1500, 2500);
+
+            // Log progress every 5 iterations
+            if ((i + 1) % 5 === 0) {
+                logger.info(`[SCRAPE] Scroll progress: ${i + 1}/${maxScrolls}, clicks: ${totalClicks}`);
+            }
+
+            // Stop if no clickable elements found for 4 iterations
+            if (!clicked && i >= 4) {
+                logger.info(`[SCRAPE] No more "load more" buttons found after ${i + 1} iterations`);
                 break;
             }
         }
+
+        logger.info(`[SCRAPE] Scrolling complete. Total clicks: ${totalClicks}`);
     }
 
     /**
