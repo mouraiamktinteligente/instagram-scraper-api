@@ -462,14 +462,30 @@ class InstagramService {
             if (currentUrl.includes('/accounts/login')) {
                 logger.warn('[LOGIN] Still on login page, checking for errors...');
 
-                // Try to get any visible error text
+                // Get page content for debugging
                 const pageContent = await page.content();
-                if (pageContent.includes('Sorry, your password was incorrect')) {
+                const pageText = await page.evaluate(() => document.body?.innerText || '');
+
+                // Log first 500 chars of page text for debugging
+                logger.info('[LOGIN] Page text after login attempt:', {
+                    preview: pageText.substring(0, 500).replace(/\n/g, ' ')
+                });
+
+                // Try to get any visible error text
+                if (pageContent.includes('Sorry, your password was incorrect') || pageText.includes('senha incorreta')) {
                     logger.error('[LOGIN] Password incorrect');
-                } else if (pageContent.includes('Please wait a few minutes')) {
+                } else if (pageContent.includes('Please wait a few minutes') || pageText.includes('Aguarde alguns minutos')) {
                     logger.error('[LOGIN] Rate limited - too many attempts');
+                } else if (pageText.includes('suspeita') || pageText.includes('suspicious')) {
+                    logger.error('[LOGIN] Suspicious activity detected');
+                } else if (pageText.includes('verificar') || pageText.includes('verify') || pageText.includes('codigo')) {
+                    logger.error('[LOGIN] Verification required');
+                } else if (pageText.includes('incorreta') || pageText.includes('incorrect') || pageText.includes('errada')) {
+                    logger.error('[LOGIN] Credentials incorrect');
                 } else {
                     logger.error('[LOGIN] Unknown error - still on login page');
+                    // Log more details for debugging
+                    logger.debug('[LOGIN] Full page text:', { text: pageText.substring(0, 2000) });
                 }
                 await page.close();
                 return false;
