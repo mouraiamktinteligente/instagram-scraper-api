@@ -1451,12 +1451,37 @@ class InstagramService {
      * @param {Page} page
      */
     async scrollForMoreComments(page) {
-        const maxScrolls = config.scraping.maxScrolls || 15;
+        const maxScrolls = config.scraping.maxScrolls || 100; // Increased max as safety limit
+        const maxNoChangeIterations = 5; // Stop after 5 iterations with no new comments
         let totalClicks = 0;
+        let previousCommentCount = 0;
+        let noChangeCount = 0;
 
-        logger.info(`[SCRAPE] Starting scroll/click for more comments (max ${maxScrolls} iterations)...`);
+        logger.info(`[SCRAPE] Starting intelligent scroll for comments (safety limit: ${maxScrolls})...`);
 
         for (let i = 0; i < maxScrolls; i++) {
+            // Count current comments (via intercepted data or DOM)
+            const currentCommentCount = await page.evaluate(() => {
+                // Count comment elements in DOM
+                const commentElements = document.querySelectorAll('ul ul li, article ul > div > li');
+                return commentElements.length;
+            });
+
+            // Check if new comments were loaded
+            if (currentCommentCount === previousCommentCount) {
+                noChangeCount++;
+                logger.debug(`[SCRAPE] No new comments (${noChangeCount}/${maxNoChangeIterations})`);
+
+                if (noChangeCount >= maxNoChangeIterations) {
+                    logger.info(`[SCRAPE] ✅ All comments loaded! No new data after ${noChangeCount} scrolls`);
+                    break;
+                }
+            } else {
+                noChangeCount = 0; // Reset counter if new comments found
+                logger.info(`[SCRAPE] Comments: ${previousCommentCount} → ${currentCommentCount} (+${currentCommentCount - previousCommentCount})`);
+            }
+            previousCommentCount = currentCommentCount;
+
             // Look for "Load more comments" or "View all comments" buttons/links
             const loadMoreSelectors = [
                 // English
@@ -1484,7 +1509,7 @@ class InstagramService {
                             await button.click().catch(() => { });
                             clicked = true;
                             totalClicks++;
-                            await randomDelay(2000, 3500);
+                            await randomDelay(1500, 2500);
                             break;
                         }
                     }
@@ -1503,21 +1528,15 @@ class InstagramService {
                 window.scrollBy(0, 400);
             });
 
-            await randomDelay(1500, 2500);
+            await randomDelay(1000, 2000);
 
-            // Log progress every 5 iterations
-            if ((i + 1) % 5 === 0) {
-                logger.info(`[SCRAPE] Scroll progress: ${i + 1}/${maxScrolls}, clicks: ${totalClicks}`);
-            }
-
-            // Stop if no clickable elements found for 4 iterations
-            if (!clicked && i >= 4) {
-                logger.info(`[SCRAPE] No more "load more" buttons found after ${i + 1} iterations`);
-                break;
+            // Log progress every 10 iterations
+            if ((i + 1) % 10 === 0) {
+                logger.info(`[SCRAPE] Progress: iteration ${i + 1}, comments: ${currentCommentCount}, clicks: ${totalClicks}`);
             }
         }
 
-        logger.info(`[SCRAPE] Scrolling complete. Total clicks: ${totalClicks}`);
+        logger.info(`[SCRAPE] Scrolling complete. Total iterations: ${previousCommentCount > 0 ? 'found data' : 'no data'}, clicks: ${totalClicks}`);
     }
 
     /**
