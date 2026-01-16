@@ -5,7 +5,7 @@
 
 const { firefox } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
-const { authenticator } = require('otplib');
+const speakeasy = require('speakeasy');
 const config = require('../config');
 const logger = require('../utils/logger');
 const accountPool = require('./accountPool.service');
@@ -594,7 +594,10 @@ class InstagramService {
             logger.info('[2FA] Account has TOTP secret, attempting to generate code...');
 
             // Generate TOTP code
-            const totpCode = authenticator.generate(account.totpSecret);
+            const totpCode = speakeasy.totp({
+                secret: account.totpSecret,
+                encoding: 'base32'
+            });
             logger.info('[2FA] Generated TOTP code:', totpCode.substring(0, 2) + '****');
 
             // Wait for the 2FA input field
