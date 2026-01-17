@@ -621,6 +621,154 @@ If you cannot find any comments, return:
 
         return [];
     }
+
+    /**
+     * Detect total number of comments on the page
+     * Looks for patterns like "Ver todos os 31 comentários" or "31 comments"
+     * @param {Page} page
+     * @returns {Promise<{total: number, expandButtonText: string|null}>}
+     */
+    async detectTotalComments(page) {
+        try {
+            const result = await page.evaluate(() => {
+                // Patterns to find comment counts
+                const patterns = [
+                    /ver\s+todos?\s+os?\s+(\d+)\s+coment[áa]rios?/i,
+                    /(\d+)\s+coment[áa]rios?/i,
+                    /view\s+all\s+(\d+)\s+comments?/i,
+                    /(\d+)\s+comments?/i,
+                ];
+
+                // Get all text from clickable elements
+                const elements = document.querySelectorAll('a, span, button, div[role="button"]');
+
+                for (const el of elements) {
+                    const text = el.innerText?.trim() || '';
+
+                    for (const pattern of patterns) {
+                        const match = text.match(pattern);
+                        if (match && match[1]) {
+                            const count = parseInt(match[1], 10);
+                            if (count > 0 && count < 10000) { // Sanity check
+                                return {
+                                    total: count,
+                                    expandButtonText: text.substring(0, 100)
+                                };
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: look in meta tags
+                const description = document.querySelector('meta[property="og:description"]')?.content || '';
+                const metaMatch = description.match(/(\d+)\s+comment/i);
+                if (metaMatch) {
+                    return {
+                        total: parseInt(metaMatch[1], 10),
+                        expandButtonText: null
+                    };
+                }
+
+                return { total: 0, expandButtonText: null };
+            });
+
+            if (result.total > 0) {
+                logger.info(`[AI-FALLBACK] Detected ${result.total} total comments`);
+                if (result.expandButtonText) {
+                    logger.info(`[AI-FALLBACK] Expand button: "${result.expandButtonText}"`);
+                }
+            }
+
+            return result;
+
+        } catch (error) {
+            logger.error('[AI-FALLBACK] Error detecting comment count:', error.message);
+            return { total: 0, expandButtonText: null };
+        }
+    }
+
+    /**
+     * Extract ALL comments from a post, using multiple strategies
+     * 1. First detects total count
+     * 2. Scrolls/clicks to load all
+     * 3. Extracts via AI if needed
+     * @param {Page} page
+     * @param {string} postId
+     * @param {string} postUrl
+     * @returns {Promise<{comments: Array, totalExpected: number}>}
+     */
+    async extractAllCommentsWithAI(page, postId, postUrl) {
+        logger.info('[AI-FALLBACK] 🔄 Starting intelligent full comment extraction...');
+
+        // Step 1: Detect total comments
+        const { total: totalExpected, expandButtonText } = await this.detectTotalComments(page);
+        logger.info(`[AI-FALLBACK] Expected total: ${totalExpected} comments`);
+
+        // Step 2: If we found an expand button, click it
+        if (expandButtonText) {
+            try {
+                // Find and click the expand button
+                const clicked = await page.evaluate((buttonText) => {
+                    const elements = document.querySelectorAll('a, span, button, div[role="button"]');
+                    for (const el of elements) {
+                        if (el.innerText?.includes(buttonText.substring(0, 20))) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }, expandButtonText);
+
+                if (clicked) {
+                    logger.info('[AI-FALLBACK] ✅ Clicked expand button, waiting for comments...');
+                    await new Promise(r => setTimeout(r, 3000));
+                }
+            } catch (e) {
+                logger.warn('[AI-FALLBACK] Could not click expand button');
+            }
+        }
+
+        // Step 3: Scroll to load more comments
+        let previousHeight = 0;
+        let scrollAttempts = 0;
+        const maxScrollAttempts = 20; // Max 20 scroll attempts
+
+        while (scrollAttempts < maxScrollAttempts) {
+            const currentHeight = await page.evaluate(() => {
+                window.scrollBy(0, 500);
+                return document.body.scrollHeight;
+            });
+
+            if (currentHeight === previousHeight) {
+                // Try clicking "load more" buttons
+                await page.evaluate(() => {
+                    const loadMore = document.querySelector('button:has-text("mais"), span:has-text("+"), div[role="button"]:has-text("carregar")');
+                    if (loadMore) loadMore.click();
+                });
+                scrollAttempts++;
+            } else {
+                scrollAttempts = 0; // Reset if new content loaded
+            }
+
+            previousHeight = currentHeight;
+            await new Promise(r => setTimeout(r, 500));
+
+            // Check if we've likely loaded all
+            if (scrollAttempts >= 3) break;
+        }
+
+        // Step 4: Extract comments using AI
+        logger.info('[AI-FALLBACK] Extracting all visible comments with AI...');
+        const comments = await this.extractCommentsDirectly(page, postId, postUrl);
+
+        logger.info(`[AI-FALLBACK] Extracted ${comments.length}/${totalExpected} comments`);
+
+        return {
+            comments,
+            totalExpected,
+            coverage: totalExpected > 0 ? Math.round((comments.length / totalExpected) * 100) : 100
+        };
+    }
 }
 
 // Export singleton instance

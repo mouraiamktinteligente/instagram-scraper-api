@@ -116,31 +116,35 @@ class InstagramService {
                 comments.push(...domComments);
             }
 
-            // Fallback 3: If we have very few comments, try AI direct extraction
+            // Fallback 3: If we have very few comments, use AI to detect total and extract ALL
             // Instagram typically shows ~15 comments initially, but posts often have more
-            if (comments.length > 0 && comments.length < 20) {
-                logger.info(`[SCRAPE] Found only ${comments.length} comments, trying AI to find more...`);
+            if (comments.length >= 0 && comments.length < 20) {
+                logger.info(`[SCRAPE] Found only ${comments.length} comments, using AI to get all...`);
 
                 try {
-                    const aiComments = await aiSelectorFallback.extractCommentsDirectly(page, postId, postUrl);
+                    // Use the intelligent extraction that detects total and scrolls to load all
+                    const aiResult = await aiSelectorFallback.extractAllCommentsWithAI(page, postId, postUrl);
 
-                    if (aiComments.length > comments.length) {
-                        logger.info(`[SCRAPE] 🤖 AI found ${aiComments.length} comments (vs ${comments.length} from scripts)`);
+                    if (aiResult.comments.length > 0) {
+                        logger.info(`[SCRAPE] 🤖 AI extracted ${aiResult.comments.length}/${aiResult.totalExpected} comments (${aiResult.coverage}% coverage)`);
 
-                        // Merge: add AI comments that aren't already in our list
-                        const existingTexts = new Set(comments.map(c => c.text?.substring(0, 50)));
-                        for (const aiComment of aiComments) {
-                            const textKey = aiComment.text?.substring(0, 50);
-                            if (!existingTexts.has(textKey)) {
-                                comments.push(aiComment);
-                                existingTexts.add(textKey);
+                        // Replace with AI comments if we got more
+                        if (aiResult.comments.length > comments.length) {
+                            // Merge: add AI comments that aren't already in our list
+                            const existingTexts = new Set(comments.map(c => c.text?.substring(0, 50)));
+                            for (const aiComment of aiResult.comments) {
+                                const textKey = aiComment.text?.substring(0, 50);
+                                if (!existingTexts.has(textKey)) {
+                                    comments.push(aiComment);
+                                    existingTexts.add(textKey);
+                                }
                             }
                         }
 
-                        logger.info(`[SCRAPE] Total after merge: ${comments.length} comments`);
+                        logger.info(`[SCRAPE] Total after AI merge: ${comments.length} comments`);
                     }
                 } catch (aiError) {
-                    logger.warn('[SCRAPE] AI extraction failed:', aiError.message);
+                    logger.warn('[SCRAPE] AI full extraction failed:', aiError.message);
                 }
             }
 
