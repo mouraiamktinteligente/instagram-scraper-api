@@ -424,10 +424,38 @@ class InstagramService {
             logger.info('[LOGIN] Step 4: Username filled');
             await randomDelay(500, 1000);
 
-            // Step 5: Fill password
+            // Step 5: Fill password - use type selector for new Instagram structure
             logger.info('[LOGIN] Step 5: Filling password...');
-            await page.fill('input[name="password"]', account.password);
-            logger.info('[LOGIN] Step 5: Password filled');
+
+            // Try multiple selectors for password field
+            const passwordSelectors = [
+                'input[name="password"]',
+                'input[type="password"]',
+                'input[aria-label*="password"]',
+                'input[aria-label*="Senha"]',
+            ];
+
+            let passwordFilled = false;
+            for (const selector of passwordSelectors) {
+                try {
+                    const pwdField = await page.$(selector);
+                    if (pwdField) {
+                        await pwdField.fill(account.password);
+                        passwordFilled = true;
+                        logger.info(`[LOGIN] Step 5: Password filled using ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            if (!passwordFilled) {
+                logger.error('[LOGIN] Could not find password field');
+                await page.close();
+                return false;
+            }
+
             await randomDelay(500, 1000);
 
             // Step 6: Click login button

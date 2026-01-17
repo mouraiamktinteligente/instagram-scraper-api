@@ -125,6 +125,7 @@ class AccountPoolService {
                 id: account.id,
                 username: account.username,
                 password: account.password,
+                totpSecret: account.totpSecret,  // 2FA TOTP secret
                 sessionData: account.sessionData
             };
         }
