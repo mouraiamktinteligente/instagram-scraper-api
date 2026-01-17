@@ -1836,6 +1836,7 @@ class InstagramService {
 
     /**
      * Scroll to load more comments
+     * IMPROVED: Scrolls within the correct comments container, not the page
      * @param {Page} page
      */
     async scrollForMoreComments(page, maxComments = null, commentsArray = []) {
@@ -1848,18 +1849,37 @@ class InstagramService {
         const hasLimit = maxComments && maxComments > 0;
         logger.info(`[SCRAPE] Starting intelligent scroll for comments (limit: ${hasLimit ? maxComments : 'unlimited'}, safety: ${maxScrolls})...`);
 
+        // First, try to find and click on the comments modal/section
+        const commentsOpened = await this.openCommentsModal(page);
+        if (commentsOpened) {
+            logger.info('[SCRAPE] Comments modal/section opened');
+            await randomDelay(2000, 3000);
+        }
+
         for (let i = 0; i < maxScrolls; i++) {
-            // Count current comments (via intercepted data or DOM)
+            // Count current comments using multiple strategies
             const currentCommentCount = await page.evaluate(() => {
-                // Count comment elements in DOM
-                const commentElements = document.querySelectorAll('ul ul li, article ul > div > li');
-                return commentElements.length;
+                // Try different selectors for comments
+                const selectors = [
+                    'ul ul li',                                    // Nested lists
+                    'article ul > div > li',                       // Article comments
+                    'div[role="dialog"] ul > div > li',           // Modal comments
+                    'section ul > div',                            // Section comments
+                    '[class*="Comment"] > div',                    // Class-based
+                ];
+
+                let maxCount = 0;
+                for (const sel of selectors) {
+                    const count = document.querySelectorAll(sel).length;
+                    if (count > maxCount) maxCount = count;
+                }
+                return maxCount;
             });
 
             // Check if new comments were loaded
             if (currentCommentCount === previousCommentCount) {
                 noChangeCount++;
-                logger.debug(`[SCRAPE] No new comments (${noChangeCount}/${maxNoChangeIterations})`);
+                logger.debug(`[SCRAPE] No new comments (${noChangeCount}/${maxNoChangeIterations}), count: ${currentCommentCount}`);
 
                 if (noChangeCount >= maxNoChangeIterations) {
                     logger.info(`[SCRAPE] ✅ All comments loaded! No new data after ${noChangeCount} scrolls`);
@@ -1871,77 +1891,148 @@ class InstagramService {
             }
             previousCommentCount = currentCommentCount;
 
-            // Check if we've reached the comment limit (using intercepted comments array)
+            // Check if we've reached the comment limit
             if (hasLimit && commentsArray.length >= maxComments) {
                 logger.info(`[SCRAPE] ✅ Reached comment limit! ${commentsArray.length}/${maxComments}`);
                 break;
             }
 
-            // Look for "Load more comments" or "View all comments" buttons/links
-            const loadMoreSelectors = [
-                // Instagram specific patterns (2024-2026)
-                'button:has-text("Ver todos os")',
-                'span:has-text("Ver todos os")',
-                'a:has-text("Ver todos os")',
-                'div[role="button"]:has-text("comentários")',
-                // English
-                'span:has-text("View all")',
-                'button:has-text("View more comments")',
-                'button:has-text("Load more")',
-                'span:has-text("more comments")',
-                'a:has-text("View all")',
-                // Portuguese
-                'span:has-text("Ver todos")',
-                'button:has-text("Ver mais comentários")',
-                'span:has-text("Ver mais")',
-                'a:has-text("Ver todos")',
-                // Plus sign for expanding hidden comments
-                'span:has-text("+")',
-                'button:has-text("+")',
-                // Generic expanders in comment section
-                'ul li[role="button"]',
-                'ul li button',
-                'div[role="button"]:has-text("+")',
-            ];
-
-            let clicked = false;
-            for (const selector of loadMoreSelectors) {
-                try {
-                    const buttons = await page.$$(selector);
-                    for (const button of buttons) {
-                        const isVisible = await button.isVisible().catch(() => false);
-                        if (isVisible) {
-                            await button.click().catch(() => { });
-                            clicked = true;
-                            totalClicks++;
-                            await randomDelay(1500, 2500);
-                            break;
-                        }
-                    }
-                    if (clicked) break;
-                } catch (e) {
-                    // Button not found or not clickable
-                }
+            // STEP 1: Try to click "Load more" or "View replies" buttons
+            const clicked = await this.clickLoadMoreButtons(page);
+            if (clicked) {
+                totalClicks++;
+                await randomDelay(2000, 4000); // More time to load
             }
 
-            // Scroll within article/main content
+            // STEP 2: Scroll within the CORRECT container (not the page)
             await page.evaluate(() => {
-                const article = document.querySelector('article');
-                if (article) {
-                    article.scrollTop += 500;
+                // Try to find the comments container (modal or inline)
+                const scrollContainers = [
+                    // Modal containers (highest priority)
+                    document.querySelector('div[role="dialog"] > div > div > div:nth-child(2)'),
+                    document.querySelector('div[role="dialog"] ul')?.parentElement,
+                    // Post page containers
+                    document.querySelector('article section:last-child'),
+                    document.querySelector('article > div > div:nth-child(2)'),
+                    // Generic scrollable
+                    document.querySelector('[style*="overflow: auto"]'),
+                    document.querySelector('[style*="overflow-y: scroll"]'),
+                ];
+
+                for (const container of scrollContainers) {
+                    if (container && container.scrollHeight > container.clientHeight) {
+                        container.scrollTop = container.scrollHeight;
+                        console.log('[SCROLL] Scrolled container:', container.tagName, container.className?.substring(0, 30));
+                        return;
+                    }
                 }
-                window.scrollBy(0, 400);
+
+                // Fallback: scroll the page
+                window.scrollBy(0, 500);
             });
 
-            await randomDelay(1000, 2000);
+            // Longer delay between scrolls for content to load
+            await randomDelay(2500, 4000);
 
-            // Log progress every 10 iterations
-            if ((i + 1) % 10 === 0) {
+            // Log progress every 5 iterations
+            if ((i + 1) % 5 === 0) {
                 logger.info(`[SCRAPE] Progress: iteration ${i + 1}, comments: ${currentCommentCount}, clicks: ${totalClicks}`);
             }
         }
 
-        logger.info(`[SCRAPE] Scrolling complete. Total iterations: ${previousCommentCount > 0 ? 'found data' : 'no data'}, clicks: ${totalClicks}`);
+        logger.info(`[SCRAPE] Scrolling complete. Total comments found: ${previousCommentCount}, clicks: ${totalClicks}`);
+    }
+
+    /**
+     * Try to open the comments modal (clicking on comments link)
+     * Instagram often shows comments in a modal overlay
+     */
+    async openCommentsModal(page) {
+        try {
+            // Check if modal is already open
+            const hasModal = await page.$('div[role="dialog"]');
+            if (hasModal) {
+                return true;
+            }
+
+            // Try to click on elements that open comments
+            const openSelectors = [
+                // Link to comments (speech bubble icon or text)
+                'a[href*="/comments/"]',
+                'svg[aria-label*="Comment"]',
+                'svg[aria-label*="Comentário"]',
+                // Comment count click area
+                'span:has-text("comentário")',
+                'span:has-text("comment")',
+            ];
+
+            for (const selector of openSelectors) {
+                try {
+                    const el = await page.$(selector);
+                    if (el && await el.isVisible()) {
+                        await el.click();
+                        await randomDelay(2000, 3000);
+
+                        // Check if modal opened
+                        const modalOpened = await page.$('div[role="dialog"]');
+                        if (modalOpened) {
+                            return true;
+                        }
+                    }
+                } catch (e) {
+                    // Try next
+                }
+            }
+
+            return false;
+        } catch (error) {
+            logger.debug('[SCRAPE] Could not open comments modal:', error.message);
+            return false;
+        }
+    }
+
+    /**
+     * Click on "Load more comments" or "View replies" buttons
+     * Returns true if any button was clicked
+     */
+    async clickLoadMoreButtons(page) {
+        const buttonPatterns = [
+            // Portuguese
+            { text: /ver mais respostas/i, priority: 1 },
+            { text: /ver respostas/i, priority: 1 },
+            { text: /carregar mais/i, priority: 2 },
+            { text: /mais comentários/i, priority: 2 },
+            // English
+            { text: /view.*replies/i, priority: 1 },
+            { text: /load more/i, priority: 2 },
+            { text: /more comments/i, priority: 2 },
+            // Generic expand
+            { text: /^\+$/, priority: 3 },
+            { text: /ver mais/i, priority: 3 },
+        ];
+
+        try {
+            for (const pattern of buttonPatterns.sort((a, b) => a.priority - b.priority)) {
+                const locator = page.getByText(pattern.text);
+                const count = await locator.count();
+
+                if (count > 0) {
+                    // Click the first visible match
+                    for (let i = 0; i < Math.min(count, 3); i++) {
+                        const element = locator.nth(i);
+                        if (await element.isVisible().catch(() => false)) {
+                            await element.click().catch(() => { });
+                            logger.debug(`[SCRAPE] Clicked: "${pattern.text}"`);
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            logger.debug('[SCRAPE] Error clicking load more:', error.message);
+        }
+
+        return false;
     }
 
     /**
