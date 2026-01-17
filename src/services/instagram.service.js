@@ -93,6 +93,13 @@ class InstagramService {
             // Wait for comments to load
             await this.waitForComments(page);
 
+            // Try to expand all comments (click "View all X comments" button)
+            const expanded = await this.expandAllComments(page);
+            if (expanded) {
+                // Give extra time for comments to load after expansion
+                await randomDelay(2000, 3000);
+            }
+
             // Scroll to load more comments (with optional limit)
             await this.scrollForMoreComments(page, maxComments, comments);
 
@@ -1623,6 +1630,139 @@ class InstagramService {
         // via GraphQL interception
         logger.warn('[SCRAPE] Could not find comments section, proceeding with GraphQL interception...');
         return false;
+    }
+
+    /**
+     * Intelligently find and click "View all X comments" button
+     * Uses multiple strategies with AI fallback
+     * @param {Page} page
+     * @returns {Promise<boolean>} Whether comments were expanded
+     */
+    async expandAllComments(page) {
+        logger.info('[SCRAPE] 🔍 Looking for "View all comments" button...');
+
+        // Strategy 1: Pattern matching on visible text
+        const expandPatterns = [
+            // Portuguese patterns
+            /ver\s+todos?\s+os?\s+(\d+)\s+coment[áa]rios?/i,
+            /ver\s+(\d+)\s+coment[áa]rios?/i,
+            /mostrar\s+todos?\s+os?\s+coment[áa]rios?/i,
+            /carregar\s+mais\s+coment[áa]rios?/i,
+            // English patterns
+            /view\s+all\s+(\d+)\s+comments?/i,
+            /see\s+all\s+(\d+)\s+comments?/i,
+            /load\s+more\s+comments?/i,
+            /show\s+all\s+comments?/i,
+        ];
+
+        // Strategy 2: CSS selectors based on structure
+        const expandSelectors = [
+            // Links/buttons with comment text
+            'a:has-text("comentário")',
+            'span:has-text("comentário")',
+            'button:has-text("comentário")',
+            'div[role="button"]:has-text("comentário")',
+            // English
+            'a:has-text("comment")',
+            'span:has-text("comment")',
+            // Specific Instagram patterns
+            'article ul > li > div > div > span',
+            'article section ul + div span',
+            'article > div > div > ul > li:first-child span',
+        ];
+
+        try {
+            // First, scan the page for text matching our patterns
+            const expandButtonInfo = await page.evaluate((patterns) => {
+                // Get all clickable elements
+                const clickables = document.querySelectorAll('a, button, span, div[role="button"]');
+
+                for (const el of clickables) {
+                    const text = el.innerText?.trim() || '';
+
+                    // Check each pattern
+                    for (const patternStr of patterns) {
+                        const pattern = new RegExp(patternStr, 'i');
+                        if (pattern.test(text)) {
+                            // Found a match! Get element info
+                            const rect = el.getBoundingClientRect();
+                            return {
+                                found: true,
+                                text: text.substring(0, 100),
+                                tagName: el.tagName,
+                                className: el.className?.substring?.(0, 50) || '',
+                                isVisible: rect.height > 0 && rect.width > 0,
+                                x: rect.x + rect.width / 2,
+                                y: rect.y + rect.height / 2
+                            };
+                        }
+                    }
+                }
+
+                return { found: false };
+            }, expandPatterns.map(p => p.source));
+
+            if (expandButtonInfo.found && expandButtonInfo.isVisible) {
+                logger.info(`[SCRAPE] ✅ Found expand button: "${expandButtonInfo.text}"`);
+
+                // Click using coordinates (more reliable)
+                await page.mouse.click(expandButtonInfo.x, expandButtonInfo.y);
+                await randomDelay(2000, 3000);
+
+                // Wait for comments modal/section to load
+                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+
+                logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
+                return true;
+            }
+
+            // Strategy 3: Try each CSS selector
+            logger.info('[SCRAPE] Pattern matching failed, trying CSS selectors...');
+
+            for (const selector of expandSelectors) {
+                try {
+                    const elements = await page.$$(selector);
+
+                    for (const el of elements) {
+                        const text = await el.textContent().catch(() => '');
+                        const isVisible = await el.isVisible().catch(() => false);
+
+                        // Check if text matches any of our patterns
+                        const matchesPattern = expandPatterns.some(p => p.test(text));
+
+                        if (matchesPattern && isVisible) {
+                            logger.info(`[SCRAPE] ✅ Found via selector: "${text.substring(0, 50)}..."`);
+                            await el.click();
+                            await randomDelay(2000, 3000);
+                            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                            return true;
+                        }
+                    }
+                } catch (e) {
+                    // Continue to next selector
+                }
+            }
+
+            // Strategy 4: AI Fallback - ask GPT to find the button
+            logger.info('[SCRAPE] CSS selectors failed, trying AI fallback...');
+
+            const aiResult = await aiSelectorFallback.findElement(page, 'view_more_comments', 'post_page');
+
+            if (aiResult.element) {
+                logger.info(`[SCRAPE] 🤖 AI found expand button with: ${aiResult.usedSelector}`);
+                await aiResult.element.click();
+                await randomDelay(2000, 3000);
+                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                return true;
+            }
+
+            logger.warn('[SCRAPE] ⚠️ Could not find "View all comments" button - may already be expanded or no comments');
+            return false;
+
+        } catch (error) {
+            logger.error('[SCRAPE] Error expanding comments:', error.message);
+            return false;
+        }
     }
 
     /**
