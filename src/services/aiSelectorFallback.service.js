@@ -734,27 +734,38 @@ If you cannot find any comments, return:
         const maxScrollAttempts = 20; // Max 20 scroll attempts
 
         while (scrollAttempts < maxScrollAttempts) {
-            const currentHeight = await page.evaluate(() => {
-                window.scrollBy(0, 500);
-                return document.body.scrollHeight;
-            });
-
-            if (currentHeight === previousHeight) {
-                // Try clicking "load more" buttons
-                await page.evaluate(() => {
-                    const loadMore = document.querySelector('button:has-text("mais"), span:has-text("+"), div[role="button"]:has-text("carregar")');
-                    if (loadMore) loadMore.click();
+            try {
+                const currentHeight = await page.evaluate(() => {
+                    window.scrollBy(0, 500);
+                    return document.body.scrollHeight;
                 });
-                scrollAttempts++;
-            } else {
-                scrollAttempts = 0; // Reset if new content loaded
+
+                if (currentHeight === previousHeight) {
+                    // Try clicking "load more" buttons using JavaScript text matching
+                    await page.evaluate(() => {
+                        const buttons = document.querySelectorAll('button, span, div[role="button"], a');
+                        for (const btn of buttons) {
+                            const text = btn.innerText?.toLowerCase() || '';
+                            if (text.includes('mais') || text.includes('carregar') || text === '+') {
+                                btn.click();
+                                break;
+                            }
+                        }
+                    });
+                    scrollAttempts++;
+                } else {
+                    scrollAttempts = 0; // Reset if new content loaded
+                }
+
+                previousHeight = currentHeight;
+                await new Promise(r => setTimeout(r, 500));
+
+                // Check if we've likely loaded all
+                if (scrollAttempts >= 3) break;
+            } catch (scrollError) {
+                logger.warn('[AI-FALLBACK] Scroll error:', scrollError.message);
+                break;
             }
-
-            previousHeight = currentHeight;
-            await new Promise(r => setTimeout(r, 500));
-
-            // Check if we've likely loaded all
-            if (scrollAttempts >= 3) break;
         }
 
         // Step 4: Extract comments using AI
