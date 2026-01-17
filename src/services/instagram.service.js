@@ -100,8 +100,10 @@ class InstagramService {
             // Try to expand all comments (click "View all X comments" button)
             const expanded = await this.expandAllComments(page);
             if (expanded) {
-                // Give extra time for comments to load after expansion
-                await randomDelay(2000, 3000);
+                // ⭐ CRITICAL: Wait for GraphQL API to respond BEFORE scrolling
+                logger.info('[SCRAPE] ⏳ Waiting for initial GraphQL response...');
+                const initialCount = await this.waitForInitialGraphQLResponse(page, comments, 60000);
+                logger.info(`[SCRAPE] ✅ Initial GraphQL loaded: ${initialCount} comments`);
             }
 
             // Scroll to load more comments (with optional limit)
@@ -1652,6 +1654,55 @@ class InstagramService {
      * Wait for comments section to load
      * @param {Page} page
      */
+    /**
+     * Wait for the initial GraphQL response after clicking "View all comments"
+     * The Instagram API takes 30-60 seconds to respond, so we must wait
+     * before starting the scroll loop
+     * 
+     * @param {Page} page - Playwright page
+     * @param {Array} commentsArray - Reference to intercepted comments array
+     * @param {number} timeoutMs - Maximum wait time (default: 60s)
+     * @returns {Promise<number>} - Number of comments loaded
+     */
+    async waitForInitialGraphQLResponse(page, commentsArray, timeoutMs = 60000) {
+        const startTime = Date.now();
+        let lastCount = 0;
+        let stableCount = 0;
+
+        while (Date.now() - startTime < timeoutMs) {
+            const currentCount = commentsArray.length;
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+
+            // If we have comments and count is stable for 3 checks
+            if (currentCount > 0) {
+                if (currentCount === lastCount) {
+                    stableCount++;
+
+                    // If stable for 3 seconds, consider it ready
+                    if (stableCount >= 3) {
+                        logger.info(`[SCRAPE] GraphQL stable at ${currentCount} comments`);
+                        return currentCount;
+                    }
+                } else {
+                    stableCount = 0; // Reset if still changing
+                    logger.info(`[SCRAPE] GraphQL loading... (${currentCount} comments, ${elapsed}s)`);
+                }
+            } else {
+                // Log progress every 5 seconds while waiting
+                if (elapsed > 0 && elapsed % 5 === 0) {
+                    logger.info(`[SCRAPE] Waiting for GraphQL... (${elapsed}s, still 0 comments)`);
+                }
+            }
+
+            lastCount = currentCount;
+            await page.waitForTimeout(1000);
+        }
+
+        // Timeout reached
+        logger.warn(`[SCRAPE] ⚠️ GraphQL timeout after ${timeoutMs / 1000}s (got ${commentsArray.length} comments)`);
+        return commentsArray.length;
+    }
+
     async waitForComments(page) {
         // Instagram's comment section selectors (updated for 2024+ DOM structure)
         const commentSelectors = [
