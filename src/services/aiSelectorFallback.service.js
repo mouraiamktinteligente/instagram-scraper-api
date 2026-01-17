@@ -597,8 +597,10 @@ If you cannot find any comments, return:
                     extracted_by: 'ai_direct'
                 }));
 
-                // Log the extraction
-                await this.supabase
+                logger.info(`[AI-FALLBACK] Converted ${comments.length} comments to standard format`);
+
+                // Log the extraction (non-blocking)
+                this.supabase
                     .from('ai_analysis_log')
                     .insert({
                         page_url: postUrl,
@@ -610,13 +612,18 @@ If you cannot find any comments, return:
                         confidence_score: parsed.confidence,
                         was_successful: comments.length > 0,
                         error_message: parsed.notes
-                    }).catch(() => { });
+                    }).then(() => {
+                        logger.debug('[AI-FALLBACK] Logged extraction to database');
+                    }).catch((logErr) => {
+                        logger.debug('[AI-FALLBACK] Could not log to database:', logErr.message);
+                    });
 
                 return comments;
             }
 
         } catch (error) {
-            logger.error('[AI-FALLBACK] Direct extraction error:', error.message);
+            logger.error('[AI-FALLBACK] Direct extraction error:', error?.message || error || 'Unknown error');
+            logger.error('[AI-FALLBACK] Error stack:', error?.stack);
         }
 
         return [];
