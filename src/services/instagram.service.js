@@ -1829,6 +1829,15 @@ class InstagramService {
                 logger.info(`[SCRAPE] Extracted ${comments.length} comments from DOM`);
             } else {
                 logger.warn('[SCRAPE] No comments extracted from DOM');
+
+                // Final fallback: try direct AI extraction
+                logger.info('[SCRAPE] Trying direct AI extraction as final fallback...');
+                const aiComments = await aiSelectorFallback.extractCommentsDirectly(page, postId, postUrl);
+
+                if (aiComments.length > 0) {
+                    logger.info(`[SCRAPE] 🤖 AI directly extracted ${aiComments.length} comments!`);
+                    return aiComments;
+                }
             }
 
         } catch (error) {

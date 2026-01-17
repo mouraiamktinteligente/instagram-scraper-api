@@ -467,6 +467,160 @@ RESPONSE FORMAT (JSON only):
             logger.debug('[AI-FALLBACK] Could not log analysis:', error.message);
         }
     }
+
+    /**
+     * Extract comments directly using AI (when selectors fail completely)
+     * This is a more expensive but more reliable fallback
+     * @param {Page} page - Playwright page
+     * @param {string} postId - Post ID
+     * @param {string} postUrl - Post URL
+     * @returns {Array} Extracted comments
+     */
+    async extractCommentsDirectly(page, postId, postUrl) {
+        if (!this.openaiApiKey) {
+            logger.warn('[AI-FALLBACK] OpenAI API key not configured for direct extraction');
+            return [];
+        }
+
+        try {
+            logger.info('[AI-FALLBACK] 🤖 Attempting direct AI comment extraction...');
+
+            // Get the full article/main content HTML
+            const html = await page.evaluate(() => {
+                const article = document.querySelector('article');
+                if (article) return article.outerHTML;
+
+                const main = document.querySelector('main');
+                if (main) return main.outerHTML;
+
+                return document.body.outerHTML.substring(0, 50000);
+            });
+
+            // Also get the visible text for context
+            const visibleText = await page.evaluate(() => {
+                const article = document.querySelector('article');
+                return article ? article.innerText : document.body.innerText.substring(0, 10000);
+            });
+
+            const prompt = `You are an expert at extracting Instagram comments from HTML.
+
+TASK: Extract ALL user comments from this Instagram post page.
+
+VISIBLE TEXT ON PAGE:
+"""
+${visibleText.substring(0, 3000)}
+"""
+
+HTML STRUCTURE:
+\`\`\`html
+${html.substring(0, 25000)}
+\`\`\`
+
+INSTRUCTIONS:
+1. Look for patterns like: username followed by comment text
+2. Comments usually appear after the main post caption
+3. Usernames are typically links to profiles
+4. Ignore the post author's caption - only extract OTHER users' comments
+5. Each comment has: username, text, possibly a timestamp
+
+RESPONSE FORMAT (JSON only):
+{
+  "comments": [
+    {"username": "user1", "text": "comment text here"},
+    {"username": "user2", "text": "another comment"}
+  ],
+  "found_count": 2,
+  "confidence": 0.9,
+  "notes": "Any observations about the page structure"
+}
+
+If you cannot find any comments, return:
+{
+  "comments": [],
+  "found_count": 0,
+  "confidence": 0.5,
+  "notes": "Explain why no comments were found"
+}`;
+
+            // Call OpenAI with larger token limit for extraction
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.openaiApiKey}`
+                },
+                body: JSON.stringify({
+                    model: 'gpt-4o-mini',
+                    messages: [
+                        {
+                            role: 'system',
+                            content: 'You are an expert at extracting structured data from web pages. Always respond with valid JSON only.'
+                        },
+                        {
+                            role: 'user',
+                            content: prompt
+                        }
+                    ],
+                    temperature: 0.2,
+                    max_tokens: 2000,
+                    response_format: { type: 'json_object' }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`OpenAI API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const content = data.choices[0]?.message?.content;
+
+            if (content) {
+                const parsed = JSON.parse(content);
+
+                logger.info(`[AI-FALLBACK] 🤖 AI extracted ${parsed.found_count} comments with confidence ${parsed.confidence}`);
+
+                if (parsed.notes) {
+                    logger.info(`[AI-FALLBACK] AI notes: ${parsed.notes}`);
+                }
+
+                // Convert to our comment format
+                const comments = (parsed.comments || []).map((c, index) => ({
+                    post_id: postId,
+                    post_url: postUrl,
+                    comment_id: `ai_${Date.now()}_${index}`,
+                    text: c.text,
+                    username: c.username,
+                    created_at: new Date().toISOString(),
+                    user_id: '',
+                    profile_pic_url: '',
+                    like_count: 0,
+                    extracted_by: 'ai_direct'
+                }));
+
+                // Log the extraction
+                await this.supabase
+                    .from('ai_analysis_log')
+                    .insert({
+                        page_url: postUrl,
+                        selector_name: 'direct_extraction',
+                        html_snippet_length: html.length,
+                        prompt_used: prompt.substring(0, 5000),
+                        model_used: 'gpt-4o-mini',
+                        selectors_found: [],
+                        confidence_score: parsed.confidence,
+                        was_successful: comments.length > 0,
+                        error_message: parsed.notes
+                    }).catch(() => { });
+
+                return comments;
+            }
+
+        } catch (error) {
+            logger.error('[AI-FALLBACK] Direct extraction error:', error.message);
+        }
+
+        return [];
+    }
 }
 
 // Export singleton instance
