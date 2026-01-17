@@ -178,6 +178,53 @@ class AISelectorFallbackService {
     }
 
     /**
+     * Check if a selector is too generic and should be rejected
+     * These selectors match too many elements and cause wrong clicks
+     * @param {string} selector - CSS selector to check
+     * @returns {boolean} true if too generic
+     */
+    isGenericSelector(selector) {
+        // List of patterns that are too generic
+        const genericPatterns = [
+            /^\[role=['"]?button['"]?\]$/i,
+            /^\[tabindex=['"]?0['"]?\]$/i,
+            /^\[role=['"]?button['"]?\]\[tabindex/i,
+            /^div$/i,
+            /^span$/i,
+            /^button$/i,
+            /^a$/i,
+            /^\[class\^=['"]?x['"]?\]/i,  // Instagram obfuscated classes alone
+            /^\*$/,  // Universal selector
+        ];
+
+        // Check if selector is too short (likely generic)
+        if (selector.length < 5) {
+            logger.debug(`[AI-FALLBACK] Rejected selector (too short): ${selector}`);
+            return true;
+        }
+
+        // Check against generic patterns
+        for (const pattern of genericPatterns) {
+            if (pattern.test(selector)) {
+                logger.debug(`[AI-FALLBACK] Rejected generic selector: ${selector}`);
+                return true;
+            }
+        }
+
+        // Check if it's a simple attribute selector without context
+        const simpleAttrPattern = /^\[[a-z-]+=['"]?[a-z0-9]+['"]?\]$/i;
+        if (simpleAttrPattern.test(selector) && !selector.includes(':')) {
+            // Unless it's a very specific attribute like data-testid
+            if (!selector.includes('data-testid') && !selector.includes('aria-label')) {
+                logger.debug(`[AI-FALLBACK] Rejected simple attribute selector: ${selector}`);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Use AI to discover new selectors
      * @param {Page} page - Playwright page
      * @param {string} name - What we're looking for
@@ -216,8 +263,24 @@ class AISelectorFallbackService {
             const response = await this.callOpenAI(prompt);
 
             if (response && response.selectors && response.selectors.length > 0) {
-                // Try the discovered selectors
-                for (const selector of response.selectors) {
+                // Filter out generic selectors that could match wrong elements
+                const validSelectors = response.selectors.filter(selector => {
+                    return !this.isGenericSelector(selector);
+                });
+
+                if (validSelectors.length === 0) {
+                    logger.warn(`[AI-FALLBACK] All AI selectors were too generic, rejecting`);
+                    return {
+                        element: null,
+                        elements: [],
+                        usedSelector: null,
+                        fromAI: false,
+                        rejected: 'all_too_generic'
+                    };
+                }
+
+                // Try the validated selectors
+                for (const selector of validSelectors) {
                     try {
                         if (findAll) {
                             const elements = await page.$$(selector);
@@ -273,45 +336,135 @@ class AISelectorFallbackService {
     }
 
     /**
-     * Build prompt for selector discovery
+     * Build intelligent prompt for selector discovery
+     * Provides detailed context about what to find, when to find it, and validation rules
      */
     buildDiscoveryPrompt(name, context, html) {
-        const descriptions = {
-            'comment_list': 'a list or container of user comments on an Instagram post',
-            'comment_item': 'individual comment items within a comments section',
-            'comment_username': 'the username/author of a comment',
-            'comment_text': 'the actual text content of a comment',
-            'login_button': 'the login/submit button on a login form',
-            'username_field': 'the username/email input field',
-            'password_field': 'the password input field',
-            'post_author': 'the author/username of the Instagram post',
-            'likes_count': 'the number of likes on a post',
-            'view_more_comments': 'a button or link to load more comments'
+        // Detailed descriptions with validation criteria
+        const elementSpecs = {
+            'comment_list': {
+                description: 'a container element holding all user comments',
+                mustContain: 'Multiple usernames and comment texts',
+                mustNot: 'Be a single comment or the post caption',
+                hints: 'Usually a <ul> or <div> with multiple child elements',
+                validateBy: 'Should contain at least 2+ different usernames'
+            },
+            'comment_item': {
+                description: 'individual comment item (one comment)',
+                mustContain: 'A username link and comment text',
+                mustNot: 'Be the post caption or a reply container',
+                hints: 'Usually <li> or <div> with a link to user profile',
+                validateBy: 'Contains exactly one username and one comment text'
+            },
+            'comment_username': {
+                description: 'the clickable username of a comment author',
+                mustContain: 'A valid Instagram username (no spaces)',
+                mustNot: 'Be the post author or a mention',
+                hints: 'Usually an <a> tag with href containing the username',
+                validateBy: 'href starts with / and is a valid username format'
+            },
+            'comment_text': {
+                description: 'the actual text content of a comment',
+                mustContain: 'User-written text (not system generated)',
+                mustNot: 'Be a timestamp, like count, or button text',
+                hints: 'Usually a <span> adjacent to username',
+                validateBy: 'Content is not a number and not a date format'
+            },
+            'view_more_comments': {
+                description: 'button/link to expand all comments',
+                mustContain: 'Text with number + "comment" (e.g., "Ver todos os 26 comentários")',
+                mustNot: 'Be a like button, share button, or generic button',
+                hints: 'Usually <span> or <a> with text matching "Ver todos" or "View all"',
+                validateBy: 'Text matches pattern: Ver/View + number + comentário/comment',
+                rejectIfGeneric: true
+            },
+            'login_button': {
+                description: 'the button to submit login form',
+                mustContain: 'Text "Entrar", "Log in", or "Sign in"',
+                mustNot: 'Be the signup button or any link',
+                hints: 'Usually <button type="submit"> or div[role="button"]',
+                validateBy: 'Is inside a form and has submit-like text'
+            },
+            'username_field': {
+                description: 'input field for username/email on login',
+                mustContain: 'input element with name or placeholder for username',
+                mustNot: 'Be the password field or search box',
+                hints: 'input[name="username"] or input with placeholder containing "user"',
+                validateBy: 'Has type="text" or no type and is in a login form'
+            },
+            'password_field': {
+                description: 'input field for password on login',
+                mustContain: 'input element with type password',
+                mustNot: 'Be any other input field',
+                hints: 'input[type="password"]',
+                validateBy: 'Has type="password"'
+            }
         };
 
-        const description = descriptions[name] || `elements named "${name}"`;
+        const spec = elementSpecs[name] || {
+            description: `element named "${name}"`,
+            mustContain: 'Relevant content',
+            mustNot: 'Be unrelated elements',
+            hints: 'Standard web element',
+            validateBy: 'Match expected content'
+        };
 
-        return `You are an expert web scraper analyzing Instagram's HTML structure.
+        return `You are an EXPERT Instagram web scraper with deep understanding of HTML structures.
 
-TASK: Find CSS selectors for "${description}" on a ${context}.
+TASK: Find the CSS selector for "${spec.description}" on a ${context} page.
 
-HTML SNIPPET (partial page):
+ELEMENT SPECIFICATION:
+- MUST CONTAIN: ${spec.mustContain}
+- MUST NOT BE: ${spec.mustNot}  
+- HINTS: ${spec.hints}
+- VALIDATE BY: ${spec.validateBy}
+
+HTML SNIPPET (partial Instagram page):
 \`\`\`html
 ${html}
 \`\`\`
 
-REQUIREMENTS:
-1. Return 3-5 CSS selectors that could match ${description}
-2. Order by specificity (most specific first)
-3. Prefer semantic selectors (aria-labels, roles, data attributes)
-4. Avoid very generic selectors that could match unrelated elements
-5. Consider Instagram uses React, so classes may be obfuscated
+CRITICAL RULES (MUST FOLLOW):
+1. ❌ NEVER return generic selectors like:
+   - [role='button']
+   - [tabindex='0']  
+   - div or span without specificity
+   - [class^='x'] (obfuscated classes alone)
+
+2. ✅ PREFER selectors that include:
+   - Text content matching (e.g., contains "comentário")
+   - Structural context (e.g., article > div > ul > li)
+   - Multiple conditions (e.g., span:has(a[href*="/"]))
+   - Semantic attributes when available
+
+3. 🎯 SPECIFICITY ORDER:
+   - data-testid attributes (highest priority)
+   - aria-label with specific text
+   - Text content patterns
+   - Structural path from known parent
+   - Class combinations (last resort)
+
+4. 🔍 FOR "${name}" SPECIFICALLY:
+   - The selector MUST be unique enough to find ONLY the target element
+   - If you can't find a good selector, return empty array
+   - Better to return nothing than a wrong selector
 
 RESPONSE FORMAT (JSON only):
 {
-  "selectors": ["selector1", "selector2", "selector3"],
-  "confidence": 0.85,
-  "reasoning": "Brief explanation"
+  "selectors": ["most_specific_selector", "backup_selector"],
+  "confidence": 0.0 to 1.0,
+  "reasoning": "Why these selectors will work",
+  "validation": "How to verify the selector is correct",
+  "warning": "Any concerns about selector reliability"
+}
+
+If you cannot find a reliable selector, return:
+{
+  "selectors": [],
+  "confidence": 0,
+  "reasoning": "Could not find unique selector for ${name}",
+  "validation": null,
+  "warning": "Element may not exist or page structure unclear"
 }`;
     }
 
