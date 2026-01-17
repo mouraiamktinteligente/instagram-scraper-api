@@ -10,7 +10,7 @@
  * 4. HOW to interact with them
  */
 
-const logger = require('./logger');
+const logger = require('../utils/logger');
 
 class PageDetectorService {
     /**
