@@ -1766,7 +1766,47 @@ class InstagramService {
                 return true;
             }
 
-            logger.warn('[SCRAPE] ⚠️ Could not find "View all comments" button - may already be expanded or no comments');
+            // DIAGNOSTIC: Get all text on page that contains "comentário" or "comment"
+            const diagnosticInfo = await page.evaluate(() => {
+                const results = [];
+                const elements = document.querySelectorAll('span, a, div[role="button"], button');
+
+                for (const el of elements) {
+                    const text = el.innerText?.trim() || '';
+                    if (text.toLowerCase().includes('coment') || text.toLowerCase().includes('comment')) {
+                        const rect = el.getBoundingClientRect();
+                        results.push({
+                            text: text.substring(0, 80),
+                            tag: el.tagName,
+                            visible: rect.height > 0 && rect.width > 0,
+                            className: el.className?.substring(0, 50) || ''
+                        });
+                    }
+                }
+
+                return {
+                    foundElements: results.slice(0, 10),
+                    pageTitle: document.title,
+                    pageUrl: location.href
+                };
+            });
+
+            // Log detailed diagnostic for debugging
+            logger.error('[SCRAPE] ❌ FAILED TO FIND "View all comments" button');
+            logger.error('[SCRAPE] 📋 DIAGNOSTIC INFO:');
+            logger.error(`[SCRAPE] Page: ${diagnosticInfo.pageUrl}`);
+            logger.error(`[SCRAPE] Title: ${diagnosticInfo.pageTitle}`);
+            logger.error(`[SCRAPE] Elements containing "coment/comment":`);
+
+            if (diagnosticInfo.foundElements.length === 0) {
+                logger.error('[SCRAPE] ⚠️ NO elements found with "comentário" or "comment" text!');
+                logger.error('[SCRAPE] ⚠️ Post may have comments disabled or page structure changed');
+            } else {
+                diagnosticInfo.foundElements.forEach((el, i) => {
+                    logger.error(`[SCRAPE]   ${i + 1}. [${el.tag}] "${el.text}" (visible: ${el.visible})`);
+                });
+            }
+
             return false;
 
         } catch (error) {
