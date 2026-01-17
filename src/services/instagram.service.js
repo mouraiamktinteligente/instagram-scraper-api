@@ -1836,111 +1836,139 @@ class InstagramService {
 
     /**
      * Scroll to load more comments
-     * IMPROVED: Scrolls within the correct comments container, not the page
+     * IMPROVED: Uses GraphQL intercepted array as source of truth (not DOM counting)
      * @param {Page} page
+     * @param {number} maxComments - Optional limit
+     * @param {Array} commentsArray - Reference to GraphQL intercepted comments
      */
     async scrollForMoreComments(page, maxComments = null, commentsArray = []) {
-        const maxScrolls = config.scraping.maxScrolls || 100; // Safety limit
-        const maxNoChangeIterations = 5; // Stop after 5 iterations with no new comments
+        const MAX_SCROLLS = 25; // Increased from 5
+        const MAX_NO_CHANGE = 7; // Stop after 7 iterations with no new GraphQL data
+        const SCROLL_DELAY = 4500; // 4.5 seconds between scrolls
+
         let totalClicks = 0;
-        let previousCommentCount = 0;
+        let previousGraphQLCount = commentsArray.length;
         let noChangeCount = 0;
 
         const hasLimit = maxComments && maxComments > 0;
-        logger.info(`[SCRAPE] Starting intelligent scroll for comments (limit: ${hasLimit ? maxComments : 'unlimited'}, safety: ${maxScrolls})...`);
+        logger.info(`[SCROLL] Starting smart scroll for comments`);
+        logger.info(`[SCROLL] Initial GraphQL count: ${previousGraphQLCount}, limit: ${hasLimit ? maxComments : 'unlimited'}, max scrolls: ${MAX_SCROLLS}`);
 
-        // First, try to find and click on the comments modal/section
+        // First, diagnose and find the correct scroll container
+        const scrollContainer = await this.findScrollContainer(page);
+        logger.info(`[SCROLL] Using container: ${scrollContainer || 'window (fallback)'}`);
+
+        // Try to open comments modal if not already open
         const commentsOpened = await this.openCommentsModal(page);
         if (commentsOpened) {
-            logger.info('[SCRAPE] Comments modal/section opened');
-            await randomDelay(2000, 3000);
+            logger.info('[SCROLL] Comments modal/section opened');
+            await randomDelay(2500, 3500);
         }
 
-        for (let i = 0; i < maxScrolls; i++) {
-            // Count current comments using multiple strategies
-            const currentCommentCount = await page.evaluate(() => {
-                // Try different selectors for comments
-                const selectors = [
-                    'ul ul li',                                    // Nested lists
-                    'article ul > div > li',                       // Article comments
-                    'div[role="dialog"] ul > div > li',           // Modal comments
-                    'section ul > div',                            // Section comments
-                    '[class*="Comment"] > div',                    // Class-based
-                ];
+        for (let i = 0; i < MAX_SCROLLS; i++) {
+            const currentGraphQLCount = commentsArray.length;
+            const timestamp = new Date().toISOString().substr(11, 8);
 
-                let maxCount = 0;
-                for (const sel of selectors) {
-                    const count = document.querySelectorAll(sel).length;
-                    if (count > maxCount) maxCount = count;
-                }
-                return maxCount;
-            });
+            logger.info(`[SCROLL] [${timestamp}] Iteration ${i + 1}/${MAX_SCROLLS}`);
+            logger.info(`[SCROLL] GraphQL has ${currentGraphQLCount} comments`);
 
-            // Check if new comments were loaded
-            if (currentCommentCount === previousCommentCount) {
+            // Check if new comments were loaded via GraphQL
+            if (currentGraphQLCount === previousGraphQLCount) {
                 noChangeCount++;
-                logger.debug(`[SCRAPE] No new comments (${noChangeCount}/${maxNoChangeIterations}), count: ${currentCommentCount}`);
+                logger.debug(`[SCROLL] No new GraphQL data (${noChangeCount}/${MAX_NO_CHANGE})`);
 
-                if (noChangeCount >= maxNoChangeIterations) {
-                    logger.info(`[SCRAPE] ✅ All comments loaded! No new data after ${noChangeCount} scrolls`);
+                if (noChangeCount >= MAX_NO_CHANGE) {
+                    logger.info(`[SCROLL] ✅ Complete! No new data after ${noChangeCount} attempts`);
                     break;
                 }
             } else {
-                noChangeCount = 0; // Reset counter if new comments found
-                logger.info(`[SCRAPE] Comments: ${previousCommentCount} → ${currentCommentCount} (+${currentCommentCount - previousCommentCount})`);
+                const newComments = currentGraphQLCount - previousGraphQLCount;
+                logger.info(`[SCROLL] ✅ +${newComments} new comments! (${previousGraphQLCount} → ${currentGraphQLCount})`);
+                noChangeCount = 0; // Reset counter
             }
-            previousCommentCount = currentCommentCount;
+            previousGraphQLCount = currentGraphQLCount;
 
-            // Check if we've reached the comment limit
-            if (hasLimit && commentsArray.length >= maxComments) {
-                logger.info(`[SCRAPE] ✅ Reached comment limit! ${commentsArray.length}/${maxComments}`);
+            // Check if we've reached the target
+            if (hasLimit && currentGraphQLCount >= maxComments) {
+                logger.info(`[SCROLL] ✅ Reached target! ${currentGraphQLCount}/${maxComments}`);
                 break;
             }
 
-            // STEP 1: Try to click "Load more" or "View replies" buttons
+            // STEP 1: Click "View replies" / "Load more" buttons
             const clicked = await this.clickLoadMoreButtons(page);
             if (clicked) {
                 totalClicks++;
-                await randomDelay(2000, 4000); // More time to load
+                await randomDelay(2000, 3500);
             }
 
-            // STEP 2: Scroll within the CORRECT container (not the page)
-            await page.evaluate(() => {
-                // Try to find the comments container (modal or inline)
-                const scrollContainers = [
-                    // Modal containers (highest priority)
-                    document.querySelector('div[role="dialog"] > div > div > div:nth-child(2)'),
-                    document.querySelector('div[role="dialog"] ul')?.parentElement,
-                    // Post page containers
-                    document.querySelector('article section:last-child'),
-                    document.querySelector('article > div > div:nth-child(2)'),
-                    // Generic scrollable
-                    document.querySelector('[style*="overflow: auto"]'),
-                    document.querySelector('[style*="overflow-y: scroll"]'),
-                ];
-
-                for (const container of scrollContainers) {
-                    if (container && container.scrollHeight > container.clientHeight) {
+            // STEP 2: Scroll in the correct container
+            await page.evaluate((containerSelector) => {
+                if (containerSelector) {
+                    const container = document.querySelector(containerSelector);
+                    if (container) {
                         container.scrollTop = container.scrollHeight;
-                        console.log('[SCROLL] Scrolled container:', container.tagName, container.className?.substring(0, 30));
                         return;
                     }
                 }
+                // Fallback: try modal, then window
+                const modal = document.querySelector('div[role="dialog"]');
+                if (modal) {
+                    modal.scrollTop = modal.scrollHeight;
+                } else {
+                    window.scrollBy(0, 600);
+                }
+            }, scrollContainer);
 
-                // Fallback: scroll the page
-                window.scrollBy(0, 500);
-            });
+            // Wait for API to respond
+            await randomDelay(SCROLL_DELAY, SCROLL_DELAY + 1500);
 
-            // Longer delay between scrolls for content to load
-            await randomDelay(2500, 4000);
-
-            // Log progress every 5 iterations
-            if ((i + 1) % 5 === 0) {
-                logger.info(`[SCRAPE] Progress: iteration ${i + 1}, comments: ${currentCommentCount}, clicks: ${totalClicks}`);
+            // Log progress every 3 iterations
+            if ((i + 1) % 3 === 0) {
+                logger.info(`[SCROLL] Progress: iteration ${i + 1}, GraphQL: ${commentsArray.length}, clicks: ${totalClicks}`);
             }
         }
 
-        logger.info(`[SCRAPE] Scrolling complete. Total comments found: ${previousCommentCount}, clicks: ${totalClicks}`);
+        logger.info(`[SCROLL] Complete! Final count: ${commentsArray.length} comments, ${totalClicks} button clicks`);
+    }
+
+    /**
+     * Find the best scrollable container for comments
+     * Returns CSS selector or null
+     */
+    async findScrollContainer(page) {
+        try {
+            const result = await page.evaluate(() => {
+                const candidates = [
+                    // Modal containers (highest priority for expanded comments)
+                    { sel: 'div[role="dialog"] > div > div > div:nth-child(2)', name: 'modal-inner' },
+                    { sel: 'div[role="dialog"] > div > div', name: 'modal-outer' },
+                    { sel: 'div[role="dialog"] ul', name: 'modal-list' },
+                    // Post page containers
+                    { sel: 'article section:last-child', name: 'article-section' },
+                    { sel: 'article > div > div:nth-child(2)', name: 'article-div' },
+                    // Overflow-based
+                    { sel: '[style*="overflow: auto"]', name: 'overflow-auto' },
+                    { sel: '[style*="overflow-y: scroll"]', name: 'overflow-scroll' },
+                ];
+
+                for (const { sel, name } of candidates) {
+                    const el = document.querySelector(sel);
+                    if (el && el.scrollHeight > el.clientHeight + 50) {
+                        console.log(`[CONTAINER] Found scrollable: ${name} (${el.scrollHeight}>${el.clientHeight})`);
+                        return { selector: sel, name, scrollable: true };
+                    }
+                }
+
+                return { selector: null, name: 'none', scrollable: false };
+            });
+
+            logger.debug(`[SCROLL] Container diagnostic: ${result.name} (scrollable: ${result.scrollable})`);
+            return result.selector;
+
+        } catch (error) {
+            logger.debug('[SCROLL] Could not find scroll container:', error.message);
+            return null;
+        }
     }
 
     /**
