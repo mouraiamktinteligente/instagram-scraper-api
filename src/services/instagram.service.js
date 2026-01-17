@@ -619,17 +619,30 @@ class InstagramService {
         }
 
         try {
-            logger.info('[2FA] Account has TOTP secret, attempting to generate code...');
+            logger.info('[2FA] ========== 2FA DEBUG START ==========');
+            logger.info(`[2FA] Account: ${account.username}`);
+            logger.info(`[2FA] TOTP Secret (first 8 chars): ${account.totpSecret.substring(0, 8)}...`);
+            logger.info(`[2FA] TOTP Secret length: ${account.totpSecret.length}`);
+            logger.info(`[2FA] Current URL: ${page.url()}`);
 
             // Generate TOTP code
             const totpCode = speakeasy.totp({
                 secret: account.totpSecret,
                 encoding: 'base32'
             });
-            logger.info('[2FA] Generated TOTP code:', totpCode.substring(0, 2) + '****');
+
+            // Log FULL code for debugging (remove in production)
+            logger.info(`[2FA] Generated TOTP code: ${totpCode}`);
+            logger.info(`[2FA] Code length: ${totpCode.length}`);
+            logger.info(`[2FA] Code type: ${typeof totpCode}`);
 
             // Wait for the 2FA input field
+            logger.info('[2FA] Waiting for 2FA page to load...');
             await randomDelay(2000, 3000);
+
+            // Log page content for debugging
+            const pageText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+            logger.info(`[2FA] Page content preview: ${pageText.replace(/\n/g, ' ')}`);
 
             // Look for 2FA code input field (various selectors)
             const codeInputSelectors = [
@@ -637,78 +650,134 @@ class InstagramService {
                 'input[name="security_code"]',
                 'input[aria-label*="Security code"]',
                 'input[aria-label*="código"]',
+                'input[aria-label*="Código"]',
                 'input[placeholder*="code"]',
                 'input[placeholder*="código"]',
                 'input[type="text"][maxlength="6"]',
+                'input[type="number"]',
                 'input[type="tel"]',
             ];
 
             let codeInput = null;
             for (const selector of codeInputSelectors) {
                 try {
-                    codeInput = await page.waitForSelector(selector, { timeout: 5000 });
+                    codeInput = await page.waitForSelector(selector, { timeout: 3000 });
                     if (codeInput) {
-                        logger.info(`[2FA] Found code input with selector: ${selector}`);
-                        break;
+                        const isVisible = await codeInput.isVisible().catch(() => false);
+                        logger.info(`[2FA] Found input with selector: ${selector} (visible: ${isVisible})`);
+                        if (isVisible) break;
+                        codeInput = null; // Reset if not visible
                     }
                 } catch (e) {
-                    // Try next selector
+                    logger.debug(`[2FA] Selector ${selector} not found`);
                 }
             }
 
             if (!codeInput) {
-                logger.warn('[2FA] Could not find 2FA code input field');
+                logger.error('[2FA] ❌ Could not find 2FA code input field');
+                logger.error(`[2FA] Available inputs: ${await page.$$eval('input', inputs => inputs.map(i => `${i.name || i.type || 'unknown'}[${i.placeholder || ''}]`).join(', '))}`);
                 return false;
             }
 
-            // Clear any existing content and type the code
+            // Clear and type the code
+            logger.info('[2FA] Filling code input...');
             await codeInput.fill('');
-            await codeInput.type(totpCode, { delay: 100 });
-            logger.info('[2FA] Code entered');
+            await codeInput.type(totpCode, { delay: 150 });
 
-            // Wait a bit before submitting
-            await randomDelay(1000, 2000);
+            // Verify what was typed
+            const typedValue = await codeInput.inputValue();
+            logger.info(`[2FA] Value in input field: ${typedValue}`);
+            logger.info(`[2FA] Match: ${typedValue === totpCode}`);
+
+            // Wait before submitting
+            await randomDelay(1000, 1500);
+
+            // Take screenshot of page state (log URL and title)
+            const urlBeforeSubmit = page.url();
+            const titleBeforeSubmit = await page.title();
+            logger.info(`[2FA] Before submit - URL: ${urlBeforeSubmit}`);
+            logger.info(`[2FA] Before submit - Title: ${titleBeforeSubmit}`);
 
             // Look for submit/confirm button
             const submitSelectors = [
                 'button[type="submit"]',
                 'button:has-text("Confirm")',
                 'button:has-text("Confirmar")',
+                'button:has-text("Verificar")',
+                'button:has-text("Verify")',
                 'button:has-text("Submit")',
                 'button:has-text("Enviar")',
-                'button:has-text("Verify")',
-                'button:has-text("Verificar")',
+                'div[role="button"]:has-text("Confirm")',
+                'div[role="button"]:has-text("Confirmar")',
             ];
 
             let submitted = false;
+            let clickedSelector = '';
             for (const selector of submitSelectors) {
                 try {
                     const submitBtn = await page.$(selector);
                     if (submitBtn) {
-                        await submitBtn.click();
-                        logger.info(`[2FA] Clicked submit button: ${selector}`);
-                        submitted = true;
-                        break;
+                        const btnText = await submitBtn.textContent().catch(() => '');
+                        const isVisible = await submitBtn.isVisible().catch(() => false);
+                        logger.info(`[2FA] Found button: ${selector} (text: "${btnText}", visible: ${isVisible})`);
+
+                        if (isVisible) {
+                            await submitBtn.click();
+                            clickedSelector = selector;
+                            submitted = true;
+                            logger.info(`[2FA] ✅ Clicked submit button: ${selector}`);
+                            break;
+                        }
                     }
                 } catch (e) {
-                    // Try next selector
+                    logger.debug(`[2FA] Button selector ${selector} failed: ${e.message}`);
                 }
             }
 
             if (!submitted) {
-                // Try pressing Enter as fallback
+                logger.warn('[2FA] No submit button found, trying Enter key...');
                 await page.keyboard.press('Enter');
+                clickedSelector = 'Enter key';
                 logger.info('[2FA] Pressed Enter to submit');
             }
 
             // Wait for navigation/response
-            await randomDelay(3000, 5000);
-            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+            logger.info('[2FA] Waiting for response after submit...');
+            await randomDelay(3000, 4000);
 
+            // Try to wait for navigation
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 8000 });
+                logger.info('[2FA] Network idle reached');
+            } catch (e) {
+                logger.warn('[2FA] Network idle timeout - continuing anyway');
+            }
+
+            // Check result
+            const urlAfterSubmit = page.url();
+            const titleAfterSubmit = await page.title();
+            logger.info(`[2FA] After submit - URL: ${urlAfterSubmit}`);
+            logger.info(`[2FA] After submit - Title: ${titleAfterSubmit}`);
+
+            // Check for error messages on page
+            const errorTexts = await page.$$eval('[role="alert"], .error, [class*="error"], [class*="Error"]',
+                elements => elements.map(e => e.textContent?.trim()).filter(Boolean)
+            ).catch(() => []);
+
+            if (errorTexts.length > 0) {
+                logger.error(`[2FA] ❌ Error messages found: ${errorTexts.join(' | ')}`);
+            }
+
+            // Log final page content
+            const finalPageText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+            logger.info(`[2FA] Final page content: ${finalPageText.replace(/\n/g, ' ')}`);
+
+            logger.info('[2FA] ========== 2FA DEBUG END ==========');
             return true;
 
         } catch (error) {
-            logger.error('[2FA] Error handling 2FA challenge:', error.message);
+            logger.error('[2FA] ❌ Exception in 2FA handler:', error.message);
+            logger.error('[2FA] Stack:', error.stack);
             return false;
         }
     }
