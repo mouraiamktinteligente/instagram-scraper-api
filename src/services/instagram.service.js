@@ -722,10 +722,53 @@ class InstagramService {
                         logger.info(`[2FA] Found button: ${selector} (text: "${btnText}", visible: ${isVisible})`);
 
                         if (isVisible) {
-                            await submitBtn.click();
+                            // Try human-like click with hover first
+                            logger.info('[2FA] Attempting human-like click...');
+
+                            // Hover over button first
+                            await submitBtn.hover();
+                            await randomDelay(300, 500);
+
+                            // Click with force option
+                            await submitBtn.click({ force: true });
                             clickedSelector = selector;
                             submitted = true;
-                            logger.info(`[2FA] ✅ Clicked submit button: ${selector}`);
+                            logger.info(`[2FA] ✅ Clicked submit button with force: ${selector}`);
+
+                            // Wait a bit and check if page changed
+                            await randomDelay(1500, 2000);
+
+                            // If still on same page, try JavaScript click
+                            const urlCheck1 = page.url();
+                            if (urlCheck1.includes('two_factor')) {
+                                logger.info('[2FA] Still on 2FA page, trying JavaScript click...');
+                                await page.evaluate((sel) => {
+                                    const btn = document.querySelector(sel) ||
+                                        document.querySelector('button[type="submit"]') ||
+                                        Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Confirm') || b.textContent.includes('Confirmar'));
+                                    if (btn) {
+                                        btn.click();
+                                        // Try to submit the form too
+                                        const form = btn.closest('form');
+                                        if (form) form.submit();
+                                    }
+                                }, 'button[type="submit"]');
+
+                                await randomDelay(1500, 2000);
+
+                                // Try form submit directly
+                                const urlCheck2 = page.url();
+                                if (urlCheck2.includes('two_factor')) {
+                                    logger.info('[2FA] Trying direct form submit...');
+                                    await page.evaluate(() => {
+                                        const forms = document.querySelectorAll('form');
+                                        forms.forEach(f => {
+                                            try { f.submit(); } catch (e) { }
+                                        });
+                                    });
+                                }
+                            }
+
                             break;
                         }
                     }
@@ -736,6 +779,9 @@ class InstagramService {
 
             if (!submitted) {
                 logger.warn('[2FA] No submit button found, trying Enter key...');
+                // Focus on input first
+                await codeInput.focus();
+                await randomDelay(200, 300);
                 await page.keyboard.press('Enter');
                 clickedSelector = 'Enter key';
                 logger.info('[2FA] Pressed Enter to submit');
