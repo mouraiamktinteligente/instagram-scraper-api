@@ -2261,14 +2261,16 @@ class InstagramService {
         }
 
         try {
-            // Deduplicate by comment_id
+            // Deduplicate by comment_id and remove columns that don't exist in the database
             const uniqueComments = [];
             const seenIds = new Set();
 
             for (const comment of comments) {
                 if (!seenIds.has(comment.comment_id)) {
                     seenIds.add(comment.comment_id);
-                    uniqueComments.push(comment);
+                    // Remove fields that don't exist in the database schema
+                    const { extracted_by, ...cleanComment } = comment;
+                    uniqueComments.push(cleanComment);
                 }
             }
 
