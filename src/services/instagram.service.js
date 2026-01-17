@@ -1667,64 +1667,77 @@ class InstagramService {
 
     /**
      * Intelligently find and click "View all X comments" button
-     * Uses multiple strategies with AI fallback
+     * Uses Playwright's built-in text locators which are more reliable
      * @param {Page} page
      * @returns {Promise<boolean>} Whether comments were expanded
      */
     async expandAllComments(page) {
         logger.info('[SCRAPE] 🔍 Looking for "View all comments" button...');
 
-        // Strategy 1: Pattern matching on visible text
-        const expandPatterns = [
-            // Portuguese patterns
-            /ver\s+todos?\s+os?\s+(\d+)\s+coment[áa]rios?/i,
-            /ver\s+(\d+)\s+coment[áa]rios?/i,
-            /mostrar\s+todos?\s+os?\s+coment[áa]rios?/i,
-            /carregar\s+mais\s+coment[áa]rios?/i,
-            // English patterns
-            /view\s+all\s+(\d+)\s+comments?/i,
-            /see\s+all\s+(\d+)\s+comments?/i,
-            /load\s+more\s+comments?/i,
-            /show\s+all\s+comments?/i,
-        ];
-
-        // Strategy 2: CSS selectors based on structure
-        const expandSelectors = [
-            // Links/buttons with comment text
-            'a:has-text("comentário")',
-            'span:has-text("comentário")',
-            'button:has-text("comentário")',
-            'div[role="button"]:has-text("comentário")',
+        // Text patterns to look for (Playwright getByText)
+        const textPatterns = [
+            // Portuguese - exact patterns
+            /Ver todos os \d+ comentários/i,
+            /Ver \d+ comentários/i,
+            /Ver todos os comentários/i,
             // English
-            'a:has-text("comment")',
-            'span:has-text("comment")',
-            // Specific Instagram patterns
-            'article ul > li > div > div > span',
-            'article section ul + div span',
-            'article > div > div > ul > li:first-child span',
+            /View all \d+ comments/i,
+            /View \d+ comments/i,
+            /View all comments/i,
         ];
 
         try {
-            // First, scan the page for text matching our patterns
-            const expandButtonInfo = await page.evaluate((patterns) => {
-                // Get all clickable elements
-                const clickables = document.querySelectorAll('a, button, span, div[role="button"]');
+            // Strategy 1: Use Playwright's getByText with regex (most reliable)
+            for (const pattern of textPatterns) {
+                try {
+                    const locator = page.getByText(pattern);
+                    const count = await locator.count();
 
-                for (const el of clickables) {
+                    if (count > 0) {
+                        // Get the first visible one
+                        const element = locator.first();
+                        const isVisible = await element.isVisible().catch(() => false);
+
+                        if (isVisible) {
+                            const text = await element.textContent();
+                            logger.info(`[SCRAPE] ✅ Found expand button: "${text?.trim()}"`);
+
+                            await element.click();
+                            await randomDelay(2000, 3000);
+
+                            // Wait for modal or new content to load
+                            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+                            logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
+                            return true;
+                        }
+                    }
+                } catch (e) {
+                    // Pattern not found, try next
+                }
+            }
+
+            // Strategy 2: Look for any element containing "comentário" or "comment" count
+            logger.info('[SCRAPE] Pattern matching failed, trying text search...');
+
+            const commentLinkInfo = await page.evaluate(() => {
+                // Find all spans and links
+                const elements = document.querySelectorAll('span, a, div[role="button"]');
+
+                for (const el of elements) {
                     const text = el.innerText?.trim() || '';
 
-                    // Check each pattern
-                    for (const patternStr of patterns) {
-                        const pattern = new RegExp(patternStr, 'i');
-                        if (pattern.test(text)) {
-                            // Found a match! Get element info
-                            const rect = el.getBoundingClientRect();
+                    // Must contain a number and "comentário" or "comment"
+                    const hasNumber = /\d+/.test(text);
+                    const hasComment = /coment[áa]rio|comment/i.test(text);
+                    const hasView = /ver|view/i.test(text);
+
+                    if (hasNumber && hasComment && hasView) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.height > 0 && rect.width > 0) {
                             return {
                                 found: true,
                                 text: text.substring(0, 100),
-                                tagName: el.tagName,
-                                className: el.className?.substring?.(0, 50) || '',
-                                isVisible: rect.height > 0 && rect.width > 0,
                                 x: rect.x + rect.width / 2,
                                 y: rect.y + rect.height / 2
                             };
@@ -1733,59 +1746,23 @@ class InstagramService {
                 }
 
                 return { found: false };
-            }, expandPatterns.map(p => p.source));
+            });
 
-            if (expandButtonInfo.found && expandButtonInfo.isVisible) {
-                logger.info(`[SCRAPE] ✅ Found expand button: "${expandButtonInfo.text}"`);
+            if (commentLinkInfo.found) {
+                logger.info(`[SCRAPE] ✅ Found via text search: "${commentLinkInfo.text}"`);
 
-                // Click using coordinates (more reliable)
-                await page.mouse.click(expandButtonInfo.x, expandButtonInfo.y);
+                await page.mouse.click(commentLinkInfo.x, commentLinkInfo.y);
                 await randomDelay(2000, 3000);
-
-                // Wait for comments modal/section to load
-                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
 
                 logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
                 return true;
             }
 
-            // Strategy 3: Try each CSS selector
-            logger.info('[SCRAPE] Pattern matching failed, trying CSS selectors...');
-
-            for (const selector of expandSelectors) {
-                try {
-                    const elements = await page.$$(selector);
-
-                    for (const el of elements) {
-                        const text = await el.textContent().catch(() => '');
-                        const isVisible = await el.isVisible().catch(() => false);
-
-                        // Check if text matches any of our patterns
-                        const matchesPattern = expandPatterns.some(p => p.test(text));
-
-                        if (matchesPattern && isVisible) {
-                            logger.info(`[SCRAPE] ✅ Found via selector: "${text.substring(0, 50)}..."`);
-                            await el.click();
-                            await randomDelay(2000, 3000);
-                            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
-                            return true;
-                        }
-                    }
-                } catch (e) {
-                    // Continue to next selector
-                }
-            }
-
-            // Strategy 4: AI Fallback - ask GPT to find the button
-            logger.info('[SCRAPE] CSS selectors failed, trying AI fallback...');
-
-            const aiResult = await aiSelectorFallback.findElement(page, 'view_more_comments', 'post_page');
-
-            if (aiResult.element) {
-                logger.info(`[SCRAPE] 🤖 AI found expand button with: ${aiResult.usedSelector}`);
-                await aiResult.element.click();
-                await randomDelay(2000, 3000);
-                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+            // Strategy 3: Check if comments are already expanded (modal is open)
+            const hasModal = await page.$('div[role="dialog"]');
+            if (hasModal) {
+                logger.info('[SCRAPE] Comments modal already open');
                 return true;
             }
 
