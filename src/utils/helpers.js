@@ -153,11 +153,22 @@ function parseComment(node, postId, postUrl, parentCommentId = null) {
  */
 function getRandomUserAgent() {
     const userAgents = [
+        // Desktop Chrome
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        // Desktop Safari
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+        // Desktop Firefox
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        // Mobile iOS
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        // Mobile Android
+        'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 13; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.193 Mobile Safari/537.36',
     ];
 
     return userAgents[Math.floor(Math.random() * userAgents.length)];
@@ -296,6 +307,9 @@ async function humanType(page, selector, text) {
     }
 }
 
+// Import advanced human behavior functions
+const humanBehavior = require('./humanBehavior');
+
 module.exports = {
     randomDelay,
     extractPostId,
@@ -310,4 +324,12 @@ module.exports = {
     humanClick,
     humanScroll,
     humanType,
+
+    // Advanced human behavior (Bézier curves, realistic typing, etc.)
+    humanMouseMove: humanBehavior.humanMouseMove,
+    humanClickAdvanced: humanBehavior.humanClick,
+    humanTypeAdvanced: humanBehavior.humanType,
+    humanScrollAdvanced: humanBehavior.humanScroll,
+    readingScroll: humanBehavior.readingScroll,
+    maybeHesitate: humanBehavior.maybeHesitate,
 };
