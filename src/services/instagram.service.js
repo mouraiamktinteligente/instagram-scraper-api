@@ -1670,17 +1670,27 @@ class InstagramService {
 
             // Look for "Load more comments" or "View all comments" buttons/links
             const loadMoreSelectors = [
+                // Instagram specific patterns (2024-2026)
+                'button:has-text("Ver todos os")',
+                'span:has-text("Ver todos os")',
+                'a:has-text("Ver todos os")',
+                'div[role="button"]:has-text("comentários")',
                 // English
                 'span:has-text("View all")',
                 'button:has-text("View more comments")',
                 'button:has-text("Load more")',
+                'span:has-text("more comments")',
                 'a:has-text("View all")',
                 // Portuguese
                 'span:has-text("Ver todos")',
                 'button:has-text("Ver mais comentários")',
                 'span:has-text("Ver mais")',
                 'a:has-text("Ver todos")',
-                // Generic - hidden comment expanders
+                // Plus sign for expanding hidden comments
+                'span:has-text("+")',
+                'button:has-text("+")',
+                // Generic expanders in comment section
+                'ul li[role="button"]',
                 'ul li button',
                 'div[role="button"]:has-text("+")',
             ];
@@ -1866,7 +1876,7 @@ class InstagramService {
                         if (content && (content.includes('comment') || content.includes('edge_media'))) {
                             results.push({
                                 id: script.id || `script-${index}`,
-                                content: content.substring(0, 50000) // Limit size
+                                content: content.substring(0, 200000) // Increased limit for large comment sections
                             });
                         }
                     } catch (e) { }
@@ -1880,7 +1890,7 @@ class InstagramService {
                         if (content) {
                             results.push({
                                 id: script.id || `preloader-${index}`,
-                                content: content.substring(0, 50000)
+                                content: content.substring(0, 200000)
                             });
                         }
                     } catch (e) { }
