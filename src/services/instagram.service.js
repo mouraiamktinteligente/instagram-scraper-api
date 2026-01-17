@@ -116,6 +116,34 @@ class InstagramService {
                 comments.push(...domComments);
             }
 
+            // Fallback 3: If we have very few comments, try AI direct extraction
+            // Instagram typically shows ~15 comments initially, but posts often have more
+            if (comments.length > 0 && comments.length < 20) {
+                logger.info(`[SCRAPE] Found only ${comments.length} comments, trying AI to find more...`);
+
+                try {
+                    const aiComments = await aiSelectorFallback.extractCommentsDirectly(page, postId, postUrl);
+
+                    if (aiComments.length > comments.length) {
+                        logger.info(`[SCRAPE] 🤖 AI found ${aiComments.length} comments (vs ${comments.length} from scripts)`);
+
+                        // Merge: add AI comments that aren't already in our list
+                        const existingTexts = new Set(comments.map(c => c.text?.substring(0, 50)));
+                        for (const aiComment of aiComments) {
+                            const textKey = aiComment.text?.substring(0, 50);
+                            if (!existingTexts.has(textKey)) {
+                                comments.push(aiComment);
+                                existingTexts.add(textKey);
+                            }
+                        }
+
+                        logger.info(`[SCRAPE] Total after merge: ${comments.length} comments`);
+                    }
+                } catch (aiError) {
+                    logger.warn('[SCRAPE] AI extraction failed:', aiError.message);
+                }
+            }
+
             // Report success
             accountPool.reportSuccess(account.username);
 
