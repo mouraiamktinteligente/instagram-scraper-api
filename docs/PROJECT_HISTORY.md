@@ -45,6 +45,11 @@
 - `page.keyboard.press('Enter')`
 - Código TOTP gerado corretamente via `speakeasy`
 
+### Login sem 2FA
+| Problema | Status | Detalhes |
+|----------|--------|----------|
+| Botão submit não encontrado | 🟢 Corrigido 17/01 | Instagram mudou interface - adicionados 8 seletores alternativos |
+
 ### Chromium
 | Problema | Status |
 |----------|--------|

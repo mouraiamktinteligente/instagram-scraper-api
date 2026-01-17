@@ -458,9 +458,41 @@ class InstagramService {
 
             await randomDelay(500, 1000);
 
-            // Step 6: Click login button
+            // Step 6: Click login button - try multiple selectors (Instagram changes frequently)
             logger.info('[LOGIN] Step 6: Clicking login button...');
-            await page.click('button[type="submit"]');
+
+            const loginButtonSelectors = [
+                'button[type="submit"]',
+                'button:has-text("Log in")',
+                'button:has-text("Log In")',
+                'button:has-text("Entrar")',
+                'div[role="button"]:has-text("Log in")',
+                'div[role="button"]:has-text("Entrar")',
+                'button._acan._acap._acas._aj1-._ap30',
+                'form button',
+            ];
+
+            let loginClicked = false;
+            for (const selector of loginButtonSelectors) {
+                try {
+                    const btn = await page.$(selector);
+                    if (btn && await btn.isVisible()) {
+                        await btn.click();
+                        loginClicked = true;
+                        logger.info(`[LOGIN] Step 6: Clicked login button with selector: ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            // Fallback: try pressing Enter on password field
+            if (!loginClicked) {
+                logger.warn('[LOGIN] Step 6: No login button found, trying Enter key...');
+                await page.keyboard.press('Enter');
+            }
+
             logger.info('[LOGIN] Step 6: Login button clicked, waiting for response...');
 
             // Step 6: Wait for navigation or error
