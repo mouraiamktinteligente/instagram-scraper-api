@@ -10,6 +10,7 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const accountPool = require('./accountPool.service');
 const aiSelectorFallback = require('./aiSelectorFallback.service');
+const commentExtractor = require('./commentExtractor.service');
 const {
     parseComment,
     getRandomUserAgent,
@@ -66,6 +67,9 @@ class InstagramService {
             }
 
             logger.info(`[SCRAPE] Using account: ${account.username}`);
+
+            // Reset comment extractor for this session (clear hashes)
+            commentExtractor.reset();
 
             // Launch browser
             browser = await this.launchBrowser(proxy);
@@ -1133,26 +1137,23 @@ class InstagramService {
                 }
 
                 // Deep search for comments in the response
-                const extractedComments = this.deepSearchForComments(data, postId, postUrl);
+                // Using the new commentExtractor for GraphQL data
+                const extractedComments = commentExtractor.extractFromGraphQL(data, postId, postUrl);
 
                 if (extractedComments.length > 0) {
                     commentApiCalls++;
-                    logger.info(`[INTERCEPT] 🎯 Found ${extractedComments.length} comments in API call #${apiCallCount}`);
+                    logger.info(`[INTERCEPT] 🎯 Found ${extractedComments.length} NEW comments in API call #${apiCallCount}`);
 
                     // Log sample comment for debugging
                     const sample = extractedComments[0];
                     logger.info(`[INTERCEPT] Sample comment: id=${sample.comment_id}, text="${sample.text?.substring(0, 30)}...", user=${sample.username}`);
 
-                    // Add unique comments only
-                    const existingIds = new Set(comments.map(c => c.comment_id));
+                    // Add to comments array (already deduplicated by commentExtractor)
                     for (const comment of extractedComments) {
-                        if (!existingIds.has(comment.comment_id)) {
-                            comments.push(comment);
-                            existingIds.add(comment.comment_id);
-                        }
+                        comments.push(comment);
                     }
 
-                    logger.info(`[INTERCEPT] Total unique comments: ${comments.length}`);
+                    logger.info(`[INTERCEPT] Total comments so far: ${comments.length} (${commentExtractor.getStats().uniqueHashes} unique hashes)`);
                 }
 
             } catch (e) {
