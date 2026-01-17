@@ -1772,14 +1772,23 @@ class InstagramService {
                             const text = await element.textContent();
                             logger.info(`[SCRAPE] ✅ Found expand button: "${text?.trim()}"`);
 
-                            await element.click();
-                            await randomDelay(2000, 3000);
+                            // ⭐ SCROLL to make button visible and centered
+                            await element.scrollIntoViewIfNeeded().catch(() => { });
+                            await randomDelay(500, 1000);
 
-                            // Wait for modal or new content to load
-                            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+                            // ⭐ WAIT for page to stabilize before clicking
+                            logger.info('[SCRAPE] Waiting for page to stabilize...');
+                            await randomDelay(3000, 4000);
 
-                            logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
-                            return true;
+                            // ⭐ MULTI-STRATEGY CLICK with verification
+                            const clickSuccess = await this.robustClick(page, element, text);
+
+                            if (clickSuccess) {
+                                // Wait for modal or new content to load
+                                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                                logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
+                                return true;
+                            }
                         }
                     }
                 } catch (e) {
@@ -1980,6 +1989,67 @@ class InstagramService {
         }
 
         logger.info(`[SCROLL] Complete! Final count: ${commentsArray.length} comments, ${totalClicks} button clicks`);
+    }
+
+    /**
+     * Perform a robust click on an element using multiple strategies
+     * Strategy 1: element.click()
+     * Strategy 2: JavaScript click
+     * Strategy 3: Mouse click at coordinates
+     * 
+     * @param {Page} page - Playwright page
+     * @param {Locator} element - Element to click
+     * @param {string} text - Text of the button (for logging)
+     * @returns {Promise<boolean>} - Whether click was successful
+     */
+    async robustClick(page, element, text) {
+        logger.info('[SCRAPE] Executing robust multi-strategy click...');
+
+        let clickCount = 0;
+
+        // Strategy 1: Normal Playwright click
+        try {
+            await element.click({ timeout: 5000 });
+            clickCount++;
+            logger.info('[SCRAPE] Strategy 1 (element.click): ✅ executed');
+        } catch (e) {
+            logger.warn('[SCRAPE] Strategy 1 (element.click): ❌ failed -', e.message);
+        }
+
+        await page.waitForTimeout(500);
+
+        // Strategy 2: JavaScript click via element handle
+        try {
+            const handle = await element.elementHandle();
+            if (handle) {
+                await handle.evaluate(el => el.click());
+                clickCount++;
+                logger.info('[SCRAPE] Strategy 2 (JS click): ✅ executed');
+            }
+        } catch (e) {
+            logger.warn('[SCRAPE] Strategy 2 (JS click): ❌ failed -', e.message);
+        }
+
+        await page.waitForTimeout(500);
+
+        // Strategy 3: Mouse click at element coordinates
+        try {
+            const box = await element.boundingBox();
+            if (box) {
+                const x = box.x + box.width / 2;
+                const y = box.y + box.height / 2;
+                await page.mouse.click(x, y);
+                clickCount++;
+                logger.info(`[SCRAPE] Strategy 3 (mouse click at ${Math.round(x)},${Math.round(y)}): ✅ executed`);
+            }
+        } catch (e) {
+            logger.warn('[SCRAPE] Strategy 3 (mouse click): ❌ failed -', e.message);
+        }
+
+        logger.info(`[SCRAPE] Click attempts: ${clickCount}/3 strategies executed`);
+
+        // Success if at least one click executed
+        return clickCount > 0;
     }
 
     /**
