@@ -9,6 +9,7 @@ const speakeasy = require('speakeasy');
 const config = require('../config');
 const logger = require('../utils/logger');
 const accountPool = require('./accountPool.service');
+const aiSelectorFallback = require('./aiSelectorFallback.service');
 const {
     parseComment,
     getRandomUserAgent,
@@ -1745,7 +1746,9 @@ class InstagramService {
             ];
 
             let commentElements = [];
+            let usedAI = false;
 
+            // Try traditional selectors first
             for (const selector of commentContainerSelectors) {
                 try {
                     const elements = await page.$$(selector);
@@ -1756,6 +1759,19 @@ class InstagramService {
                     }
                 } catch (e) {
                     continue;
+                }
+            }
+
+            // If no comments found, try AI fallback
+            if (commentElements.length === 0) {
+                logger.info('[SCRAPE] Traditional selectors failed, trying AI fallback...');
+
+                const aiResult = await aiSelectorFallback.findAllElements(page, 'comment_item', 'post_page');
+
+                if (aiResult.elements && aiResult.elements.length > 0) {
+                    commentElements = aiResult.elements;
+                    usedAI = true;
+                    logger.info(`[SCRAPE] 🤖 AI found ${aiResult.count} comment elements with: ${aiResult.usedSelector}`);
                 }
             }
 
