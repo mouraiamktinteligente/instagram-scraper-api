@@ -521,7 +521,8 @@ class InstagramService {
                 try {
                     const btn = await page.$(selector);
                     if (btn && await btn.isVisible()) {
-                        await btn.click();
+                        // Use force:true and multiple click strategies
+                        await btn.click({ force: true });
                         loginClicked = true;
                         logger.info(`[LOGIN] Step 6: Clicked login button with selector: ${selector}`);
                         break;
@@ -531,16 +532,34 @@ class InstagramService {
                 }
             }
 
-            // Fallback: try pressing Enter on password field
-            if (!loginClicked) {
-                logger.warn('[LOGIN] Step 6: No login button found, trying Enter key...');
-                await page.keyboard.press('Enter');
+            // ALWAYS try Enter key as redundancy (most reliable)
+            logger.info('[LOGIN] Step 6: Pressing Enter key as redundancy...');
+            await page.keyboard.press('Enter');
+            await randomDelay(1000, 1500);
+
+            // Try clicking again with JavaScript if first click didn't work
+            if (loginClicked) {
+                try {
+                    await page.evaluate(() => {
+                        const btns = document.querySelectorAll('button, div[role="button"]');
+                        for (const btn of btns) {
+                            const text = btn.innerText?.toLowerCase() || '';
+                            if (text.includes('entrar') || text.includes('log in')) {
+                                btn.click();
+                                break;
+                            }
+                        }
+                    });
+                    logger.info('[LOGIN] Step 6: JavaScript click executed');
+                } catch (e) {
+                    // Ignore JS click errors
+                }
             }
 
             logger.info('[LOGIN] Step 6: Login button clicked, waiting for response...');
 
-            // Step 6: Wait for navigation or error
-            await randomDelay(5000, 8000);
+            // Step 6: Wait for navigation or error - increase wait time
+            await randomDelay(6000, 10000);
 
             const currentUrl = page.url();
             logger.info(`[LOGIN] Step 6: Current URL after login attempt: ${currentUrl}`);
