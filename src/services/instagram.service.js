@@ -2209,6 +2209,28 @@ class InstagramService {
                                 // Wait for modal or new content to load
                                 await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
                                 logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
+
+                                // ⭐ VERIFY: Check if comments modal/panel actually opened
+                                await randomDelay(2000, 3000);
+                                const modalOpened = await page.evaluate(() => {
+                                    // Check for visible comment input field (indicates comments section is open)
+                                    const commentInput = document.querySelector('textarea[placeholder*="comentário"], textarea[placeholder*="comment"], input[placeholder*="comentário"]');
+                                    // Check for visible comment list
+                                    const commentList = document.querySelector('ul li span');
+                                    // Check for dialog that might contain comments
+                                    const dialog = document.querySelector('div[role="dialog"]');
+
+                                    return !!(commentInput || commentList || dialog);
+                                });
+
+                                if (!modalOpened) {
+                                    logger.warn('[SCRAPE] ⚠️ Modal may not have opened, trying double-click...');
+                                    // Try clicking again
+                                    await randomDelay(500, 1000);
+                                    await this.robustClick(page, element, text);
+                                    await randomDelay(2000, 3000);
+                                }
+
                                 return true;
                             }
                         }
