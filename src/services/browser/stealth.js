@@ -3,7 +3,7 @@
  * Baseado em pesquisas de anti-detection 2025
  */
 
-const logger = require('../../config/logger');
+const logger = require('../../utils/logger');
 
 class StealthService {
     /**
