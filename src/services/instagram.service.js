@@ -112,7 +112,11 @@ class InstagramService {
             // NEW FALLBACK: Extract visible comments from DOM directly (after scroll)
             // This catches comments that are visible in the modal/page but not intercepted via GraphQL
             if (comments.length < 20) {
-                logger.info('[SCRAPE] 📥 Extracting visible comments from DOM...');
+                logger.info('[SCRAPE] 📥 Scrolling modal and extracting visible comments from DOM...');
+
+                // First, aggressively scroll the modal to load ALL comments
+                await this.scrollModalToLoadAllComments(page);
+
                 const visibleComments = await this.extractVisibleCommentsFromDOM(page, postId, postUrl);
                 if (visibleComments.length > 0) {
                     logger.info(`[SCRAPE] DOM extraction found ${visibleComments.length} comments`);
@@ -2774,6 +2778,93 @@ class InstagramService {
         }
 
         return comments;
+    }
+
+    /**
+     * Aggressively scroll the modal/page to load ALL comments before DOM extraction
+     * Uses mouse.wheel directly in the comments area
+     * @param {Page} page 
+     */
+    async scrollModalToLoadAllComments(page) {
+        const MAX_SCROLL_ATTEMPTS = 10;
+        const SCROLL_DELAY = 800;
+
+        try {
+            logger.info('[MODAL-SCROLL] 🔄 Starting aggressive modal scroll to load all comments...');
+
+            // Find the scrollable area - try multiple strategies
+            const scrollTarget = await page.evaluate(() => {
+                // Strategy 1: Find dialog/modal
+                const dialog = document.querySelector('div[role="dialog"]');
+                if (dialog) {
+                    const rect = dialog.getBoundingClientRect();
+                    // Use right side of dialog (where comments typically are)
+                    return {
+                        x: rect.x + rect.width * 0.7,
+                        y: rect.y + rect.height * 0.5,
+                        type: 'dialog',
+                        found: true
+                    };
+                }
+
+                // Strategy 2: Find article and use right side (comments panel)
+                const article = document.querySelector('article');
+                if (article) {
+                    const rect = article.getBoundingClientRect();
+                    return {
+                        x: rect.x + rect.width * 0.75,
+                        y: rect.y + rect.height * 0.5,
+                        type: 'article',
+                        found: true
+                    };
+                }
+
+                // Strategy 3: Just use center-right of viewport
+                return {
+                    x: window.innerWidth * 0.7,
+                    y: window.innerHeight * 0.5,
+                    type: 'viewport',
+                    found: true
+                };
+            });
+
+            if (!scrollTarget.found) {
+                logger.warn('[MODAL-SCROLL] Could not find scroll target');
+                return;
+            }
+
+            logger.info(`[MODAL-SCROLL] Using scroll target: ${scrollTarget.type} at (${Math.round(scrollTarget.x)}, ${Math.round(scrollTarget.y)})`);
+
+            // Move mouse to the scroll target
+            await page.mouse.move(scrollTarget.x, scrollTarget.y);
+
+            // Scroll aggressively multiple times
+            for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                await page.mouse.wheel(0, 600); // Scroll down 600px
+                await page.waitForTimeout(SCROLL_DELAY);
+
+                // Check if we've reached the bottom (by seeing if "Adicione um comentário" appears)
+                const reachedBottom = await page.evaluate(() => {
+                    const text = document.body.innerText;
+                    return text.includes('Adicione um comentário') ||
+                        text.includes('Add a comment') ||
+                        text.includes('Escreva um comentário');
+                });
+
+                if (i > 2 && reachedBottom) {
+                    logger.info(`[MODAL-SCROLL] Reached bottom after ${i + 1} scrolls`);
+                    break;
+                }
+            }
+
+            // Final wait for any lazy-loaded content
+            await page.waitForTimeout(1000);
+
+            logger.info('[MODAL-SCROLL] ✅ Modal scroll complete');
+
+        } catch (error) {
+            logger.warn('[MODAL-SCROLL] Error during modal scroll:', error.message);
+        }
     }
 
     /**
