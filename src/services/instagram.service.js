@@ -1669,79 +1669,151 @@ class InstagramService {
 
     /**
      * Detect which layout Instagram is serving
+     * Uses ROBUST selectors based on visual structure, not just article/dialog
      * @param {Page} page 
      * @returns {Promise<Object>} Layout information
      */
     async detectLayoutType(page) {
         const detection = await page.evaluate(() => {
-            const article = document.querySelector('article');
-            const dialog = document.querySelector('div[role="dialog"]');
+            // === ROBUST SELECTORS ===
+            // Try multiple selectors for each element
+
+            // Dialog detection - try multiple patterns
+            const dialogSelectors = [
+                'div[role="dialog"]',
+                '[class*="Modal"]',
+                '[class*="modal"]',
+                'div[style*="position: fixed"]',
+                'main > div > div > div' // Instagram's nested structure
+            ];
+            let dialog = null;
+            for (const sel of dialogSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetWidth > 500 && el.offsetHeight > 400) {
+                    dialog = el;
+                    break;
+                }
+            }
+
+            // Article detection - try multiple patterns
+            const articleSelectors = [
+                'article',
+                'main article',
+                'main > div > div', // Common Instagram wrapper
+                '[role="main"]'
+            ];
+            let article = null;
+            for (const sel of articleSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetWidth > 300) {
+                    article = el;
+                    break;
+                }
+            }
+
+            // Video detection
             const video = document.querySelector('video');
+            const hasLargeVideo = video && video.offsetWidth > 300;
 
-            // Indicators for MODAL_POST_VIEW
-            const hasFollowButton = Array.from(document.querySelectorAll('button'))
-                .some(b => b.textContent.includes('Seguir') || b.textContent.includes('Follow'));
-            const hasLargeVideo = video && video.offsetWidth > 400;
-            const hasLikeSection = !!document.querySelector('section span') ||
-                document.body.innerText.includes('curtida') ||
-                document.body.innerText.includes('like');
+            // Comment panel detection - look for scrollable section with UL
+            const sections = document.querySelectorAll('section');
+            let commentPanel = null;
+            let commentPanelRect = null;
 
-            // Indicators for FEED_INLINE
-            const hasFeedComments = article?.querySelector('section ul') || article?.querySelector('ul');
-            const hasSidebar = !!document.querySelector('nav') ||
-                !!document.querySelector('a[href="/"]');
+            for (const section of sections) {
+                const ul = section.querySelector('ul');
+                if (ul) {
+                    const rect = section.getBoundingClientRect();
+                    // Panel should be on the right side and have reasonable size
+                    if (rect.width > 200 && rect.height > 200) {
+                        commentPanel = section;
+                        commentPanelRect = {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                            scrollHeight: section.scrollHeight,
+                            clientHeight: section.clientHeight,
+                            isScrollable: section.scrollHeight > section.clientHeight + 50
+                        };
+                        break;
+                    }
+                }
+            }
 
-            // Get rects for scroll targeting
-            const articleRect = article?.getBoundingClientRect();
-            const dialogRect = dialog?.getBoundingClientRect();
+            // Count visible comments
+            const allLists = document.querySelectorAll('ul');
+            let visibleComments = 0;
+            for (const ul of allLists) {
+                const items = ul.querySelectorAll('li');
+                for (const li of items) {
+                    const text = li.innerText || '';
+                    if (text.includes('@') || text.includes('Responder') || text.includes('Reply')) {
+                        visibleComments++;
+                    }
+                }
+            }
 
-            // Count visible comment-like elements
-            const commentElements = document.querySelectorAll('ul li');
-            const visibleComments = Array.from(commentElements).filter(li => {
-                const text = li.innerText || '';
-                return text.includes('@') || text.includes('Responder') || text.includes('Reply');
-            }).length;
+            // Check for comment indicators in page
+            const pageText = document.body.innerText || '';
+            const hasCommentIndicators = pageText.includes('curtida') ||
+                pageText.includes('like') ||
+                pageText.includes('comentário') ||
+                pageText.includes('comment');
+
+            // Follow button detection
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const hasFollowButton = buttons.some(b =>
+                b.textContent.includes('Seguir') || b.textContent.includes('Follow')
+            );
 
             return {
-                hasArticle: !!article,
                 hasDialog: !!dialog,
-                hasFollowButton,
+                hasArticle: !!article,
+                hasVideo: !!video,
                 hasLargeVideo,
-                hasLikeSection,
-                hasFeedComments: !!hasFeedComments,
-                hasSidebar,
-                articleRect: articleRect ? {
-                    width: articleRect.width,
-                    height: articleRect.height,
-                    x: articleRect.x,
-                    y: articleRect.y
-                } : null,
-                dialogRect: dialogRect ? {
-                    width: dialogRect.width,
-                    height: dialogRect.height,
-                    x: dialogRect.x,
-                    y: dialogRect.y
-                } : null,
-                videoWidth: video?.offsetWidth || 0,
-                visibleComments
+                hasCommentPanel: !!commentPanel,
+                commentPanelRect,
+                visibleComments,
+                hasFollowButton,
+                hasCommentIndicators,
+                viewport: { width: window.innerWidth, height: window.innerHeight }
             };
         });
 
-        // Determine layout type based on indicators
+        // Log detection details
+        logger.info(`[LAYOUT-DETECT] hasDialog=${detection.hasDialog}, hasArticle=${detection.hasArticle}, hasVideo=${detection.hasVideo}, hasCommentPanel=${detection.hasCommentPanel}`);
+        logger.info(`[LAYOUT-DETECT] visibleComments=${detection.visibleComments}, hasFollowButton=${detection.hasFollowButton}`);
+        if (detection.commentPanelRect) {
+            logger.info(`[LAYOUT-DETECT] commentPanel: ${detection.commentPanelRect.width}x${detection.commentPanelRect.height}, scrollable=${detection.commentPanelRect.isScrollable}`);
+        }
+
+        // === LAYOUT DETERMINATION ===
         let layoutType = 'UNKNOWN';
 
-        // MODAL_POST_VIEW: Has dialog, or large video with follow button
-        if (detection.hasDialog || (detection.hasLargeVideo && detection.hasFollowButton)) {
+        // MODAL: Has video + comment panel (typical post view)
+        if (detection.hasVideo && detection.hasCommentPanel) {
             layoutType = 'MODAL_POST_VIEW';
         }
-        // FEED_INLINE: Has article with feed-style comments
-        else if (detection.hasArticle && (detection.hasFeedComments || detection.hasSidebar)) {
+        // MODAL: Has dialog detected
+        else if (detection.hasDialog) {
+            layoutType = 'MODAL_POST_VIEW';
+        }
+        // MODAL: Has large video with follow button
+        else if (detection.hasLargeVideo && detection.hasFollowButton) {
+            layoutType = 'MODAL_POST_VIEW';
+        }
+        // FEED_INLINE: Has article with comments
+        else if (detection.hasArticle && detection.visibleComments > 0) {
             layoutType = 'FEED_INLINE';
         }
-        // Has article but unknown structure - default to FEED_INLINE
-        else if (detection.hasArticle) {
-            layoutType = 'FEED_INLINE';
+        // FALLBACK: If we have comment indicators, assume MODAL (most common)
+        else if (detection.hasCommentIndicators && detection.visibleComments > 0) {
+            layoutType = 'MODAL_POST_VIEW';
+            logger.info('[LAYOUT-DETECT] Using MODAL fallback based on comment indicators');
         }
+
+        logger.info(`[LAYOUT] 📱 Detected layout: ${layoutType}`);
 
         return {
             layoutType,
@@ -1751,76 +1823,127 @@ class InstagramService {
 
     /**
      * Get the optimal scroll strategy based on layout type
+     * Uses ROBUST selectors to find the comment panel
      * @param {Page} page 
      * @returns {Promise<Object>} Scroll strategy with coords and type
      */
     async getScrollStrategy(page) {
-        const layoutType = this.currentLayoutType || 'UNKNOWN';
+        const layoutType = this.currentLayoutType || 'MODAL_POST_VIEW'; // Default to MODAL since that's most common
 
-        return await page.evaluate((layout) => {
-            if (layout === 'MODAL_POST_VIEW') {
-                // Modal/Post view: scroll the comments panel (usually on the right)
-                const dialog = document.querySelector('div[role="dialog"]');
-                const article = document.querySelector('article');
+        const strategy = await page.evaluate((layout) => {
+            // === FIND SCROLLABLE COMMENT PANEL ===
+            // Try multiple strategies to find the right scrollable element
 
-                // Find scrollable container in dialog or article
-                const containers = [
-                    dialog?.querySelector('section'),
-                    dialog?.querySelector('ul'),
-                    article?.querySelector('section'),
-                    article?.querySelector('div[style*="overflow"]')
-                ].filter(Boolean);
+            // Strategy 1: Find section with UL (most reliable for comments)
+            const sections = document.querySelectorAll('section');
+            for (const section of sections) {
+                const ul = section.querySelector('ul');
+                if (ul) {
+                    const rect = section.getBoundingClientRect();
+                    // Check if section is scrollable or its parent is
+                    const isScrollable = section.scrollHeight > section.clientHeight + 50;
+                    const parentScrollable = section.parentElement &&
+                        section.parentElement.scrollHeight > section.parentElement.clientHeight + 50;
 
-                for (const container of containers) {
-                    if (container.scrollHeight > container.clientHeight + 50) {
-                        const rect = container.getBoundingClientRect();
+                    if (rect.width > 200 && rect.height > 200) {
                         return {
-                            type: 'ELEMENT_SCROLL',
-                            selector: container.tagName.toLowerCase(),
-                            coords: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-                            elementInfo: { scrollHeight: container.scrollHeight, clientHeight: container.clientHeight }
+                            type: isScrollable ? 'ELEMENT_SCROLL' : 'WHEEL_SCROLL',
+                            selector: 'section',
+                            coords: {
+                                x: rect.x + rect.width * 0.5,
+                                y: rect.y + rect.height * 0.5
+                            },
+                            elementInfo: {
+                                scrollHeight: section.scrollHeight,
+                                clientHeight: section.clientHeight,
+                                isScrollable,
+                                parentScrollable
+                            }
                         };
                     }
                 }
+            }
 
-                // Fallback: use mouse wheel on right side of screen
-                const rect = (dialog || article)?.getBoundingClientRect();
-                if (rect) {
-                    return {
-                        type: 'WHEEL_SCROLL',
-                        coords: { x: rect.x + rect.width * 0.75, y: rect.y + rect.height * 0.5 }
-                    };
-                }
-            } else {
-                // FEED_INLINE: scroll the comments list directly
-                const commentsList = document.querySelector('article section ul') ||
-                    document.querySelector('article ul');
-                if (commentsList) {
-                    const rect = commentsList.getBoundingClientRect();
-                    return {
-                        type: 'ELEMENT_SCROLL',
-                        selector: 'article ul',
-                        coords: { x: rect.x + rect.width / 2, y: rect.y + 100 }
-                    };
-                }
+            // Strategy 2: Find any UL with comments
+            const allULs = document.querySelectorAll('ul');
+            for (const ul of allULs) {
+                const items = ul.querySelectorAll('li');
+                if (items.length > 0) {
+                    // Check if any item looks like a comment
+                    let hasComments = false;
+                    for (const li of items) {
+                        const text = li.innerText || '';
+                        if (text.includes('@') || text.includes('Responder')) {
+                            hasComments = true;
+                            break;
+                        }
+                    }
 
-                // Fallback: use article right side
-                const article = document.querySelector('article');
-                if (article) {
-                    const rect = article.getBoundingClientRect();
-                    return {
-                        type: 'WHEEL_SCROLL',
-                        coords: { x: rect.x + rect.width * 0.75, y: rect.y + rect.height * 0.5 }
-                    };
+                    if (hasComments) {
+                        const rect = ul.getBoundingClientRect();
+                        // Find the scrollable parent
+                        let scrollParent = ul.parentElement;
+                        while (scrollParent && scrollParent !== document.body) {
+                            if (scrollParent.scrollHeight > scrollParent.clientHeight + 50) {
+                                break;
+                            }
+                            scrollParent = scrollParent.parentElement;
+                        }
+
+                        return {
+                            type: 'WHEEL_SCROLL',
+                            selector: 'ul-comments',
+                            coords: {
+                                x: rect.x + rect.width * 0.5,
+                                y: rect.y + 100
+                            },
+                            elementInfo: {
+                                ulItems: items.length,
+                                scrollParent: scrollParent?.tagName || 'none'
+                            }
+                        };
+                    }
                 }
             }
 
-            // Ultimate fallback
+            // Strategy 3: Find div with overflow on right side of viewport
+            const divs = document.querySelectorAll('div');
+            for (const div of divs) {
+                const style = window.getComputedStyle(div);
+                const rect = div.getBoundingClientRect();
+
+                // Look for scrollable divs on the right side
+                if (rect.x > window.innerWidth * 0.4 && rect.width > 200 && rect.height > 200) {
+                    if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                        return {
+                            type: 'WHEEL_SCROLL',
+                            selector: 'div-overflow',
+                            coords: {
+                                x: rect.x + rect.width * 0.5,
+                                y: rect.y + rect.height * 0.5
+                            }
+                        };
+                    }
+                }
+            }
+
+            // Strategy 4: Fallback - use right side of viewport (where comments typically are)
             return {
-                type: 'WINDOW_SCROLL',
-                coords: { x: window.innerWidth * 0.7, y: window.innerHeight * 0.5 }
+                type: 'WHEEL_SCROLL',
+                selector: 'viewport-right',
+                coords: {
+                    x: window.innerWidth * 0.75,
+                    y: window.innerHeight * 0.5
+                }
             };
         }, layoutType);
+
+        logger.info(`[SCROLL-STRATEGY] type=${strategy.type}, selector=${strategy.selector}, coords=(${Math.round(strategy.coords.x)}, ${Math.round(strategy.coords.y)})`);
+        if (strategy.elementInfo) {
+            logger.info(`[SCROLL-STRATEGY] elementInfo:`, strategy.elementInfo);
+        }
+
+        return strategy;
     }
 
     /**
@@ -3022,76 +3145,83 @@ class InstagramService {
 
     /**
      * Aggressively scroll the modal/page to load ALL comments before DOM extraction
-     * Uses getScrollStrategy to pick the best scroll method based on layout type
+     * Uses getScrollStrategy to pick the best scroll method
+     * Includes progressive comment counting
      * @param {Page} page 
      */
     async scrollModalToLoadAllComments(page) {
-        const MAX_SCROLL_ATTEMPTS = 12;
-        const SCROLL_DELAY = 800;
+        const MAX_SCROLL_ATTEMPTS = 25; // Increased for more comments
+        const SCROLL_DELAY = 600;
 
         try {
             // Use stored layout type or detect on the fly
-            const layoutType = this.currentLayoutType || 'UNKNOWN';
+            const layoutType = this.currentLayoutType || 'MODAL_POST_VIEW';
             logger.info(`[SCROLL] 📱 Layout type: ${layoutType}`);
 
             // Get optimal scroll strategy
             const strategy = await this.getScrollStrategy(page);
-            logger.info(`[SCROLL] Using strategy: ${strategy.type} at (${Math.round(strategy.coords?.x || 0)}, ${Math.round(strategy.coords?.y || 0)})`);
 
-            if (strategy.type === 'ELEMENT_SCROLL') {
-                // Scroll via JavaScript on the specific element
-                logger.info(`[SCROLL] 🔄 Scrolling element with selector: ${strategy.selector}`);
+            // Move mouse to scroll target
+            if (strategy.coords) {
+                await page.mouse.move(strategy.coords.x, strategy.coords.y);
+            }
 
-                for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-                    // Try scrolling by selector and also by coords with wheel
+            // Count initial comments
+            let previousCount = await this.countVisibleComments(page);
+            let sameCountIterations = 0;
+
+            logger.info(`[SCROLL] Starting with ${previousCount} visible comments`);
+
+            // Progressive scroll loop
+            for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                // Scroll using the determined strategy
+                if (strategy.type === 'ELEMENT_SCROLL') {
+                    // Try scrolling elements via JS
                     await page.evaluate(() => {
-                        // Find any scrollable element and scroll it
-                        const scrollables = document.querySelectorAll('section, ul, div[style*="overflow"]');
+                        const scrollables = document.querySelectorAll('section, ul, div');
                         for (const el of scrollables) {
                             if (el.scrollHeight > el.clientHeight + 50) {
-                                el.scrollTop += 400;
+                                el.scrollTop += 500;
                             }
                         }
                     });
-
-                    // Also use mouse wheel as backup
-                    if (strategy.coords) {
-                        await page.mouse.move(strategy.coords.x, strategy.coords.y);
-                        await page.mouse.wheel(0, 400);
-                    }
-
-                    await page.waitForTimeout(SCROLL_DELAY);
-
-                    if (await this.hasReachedCommentsBottom(page)) {
-                        logger.info(`[SCROLL] Reached bottom after ${i + 1} scrolls`);
-                        break;
-                    }
                 }
 
-            } else if (strategy.type === 'WHEEL_SCROLL') {
-                // Scroll via mouse wheel at specific coordinates
-                logger.info(`[SCROLL] 🔄 Using mouse wheel at (${Math.round(strategy.coords.x)}, ${Math.round(strategy.coords.y)})`);
-
-                await page.mouse.move(strategy.coords.x, strategy.coords.y);
-
-                for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                // Always also use mouse wheel at the target coords
+                if (strategy.coords) {
                     await page.mouse.wheel(0, 500);
-                    await page.waitForTimeout(SCROLL_DELAY);
+                }
 
-                    if (await this.hasReachedCommentsBottom(page)) {
-                        logger.info(`[SCROLL] Reached bottom after ${i + 1} scrolls`);
+                await page.waitForTimeout(SCROLL_DELAY);
+
+                // Count comments after scroll
+                const currentCount = await this.countVisibleComments(page);
+
+                if (currentCount > previousCount) {
+                    logger.info(`[SCROLL] Iteration ${i + 1}: ${previousCount} → ${currentCount} comments (+${currentCount - previousCount})`);
+                    previousCount = currentCount;
+                    sameCountIterations = 0;
+                } else {
+                    sameCountIterations++;
+                    logger.debug(`[SCROLL] Iteration ${i + 1}: No new comments (${sameCountIterations}/3)`);
+
+                    // If count hasn't changed for 3 iterations, probably reached end
+                    if (sameCountIterations >= 3) {
+                        logger.info(`[SCROLL] No new comments after 3 iterations, stopping`);
                         break;
                     }
                 }
 
-            } else {
-                // WINDOW_SCROLL: Fall back to window scroll
-                logger.warn('[SCROLL] Using window scroll fallback');
-                for (let i = 0; i < 5; i++) {
-                    await page.evaluate(() => window.scrollBy(0, 500));
-                    await page.waitForTimeout(SCROLL_DELAY);
+                // Check if we've reached the input field (end of comments)
+                if (await this.hasReachedCommentsBottom(page)) {
+                    logger.info(`[SCROLL] ✅ Reached comment input after ${i + 1} scrolls`);
+                    break;
                 }
             }
+
+            // Final count
+            const finalCount = await this.countVisibleComments(page);
+            logger.info(`[SCROLL] ✅ Scroll complete. Final visible comments: ${finalCount}`);
 
             // Final wait for lazy-loaded content
             await page.waitForTimeout(1000);
@@ -3207,6 +3337,32 @@ class InstagramService {
             return text.includes('Adicione um comentário') ||
                 text.includes('Add a comment') ||
                 text.includes('Escreva um comentário');
+        });
+    }
+
+    /**
+     * Count visible comments on the page
+     * @param {Page} page 
+     * @returns {Promise<number>}
+     */
+    async countVisibleComments(page) {
+        return await page.evaluate(() => {
+            let count = 0;
+            const allLists = document.querySelectorAll('ul');
+            for (const ul of allLists) {
+                const items = ul.querySelectorAll('li');
+                for (const li of items) {
+                    const text = li.innerText || '';
+                    // Comment indicators: @username, Responder, Reply, or likes
+                    if (text.includes('@') ||
+                        text.includes('Responder') ||
+                        text.includes('Reply') ||
+                        text.includes('curtida')) {
+                        count++;
+                    }
+                }
+            }
+            return count;
         });
     }
 
