@@ -2113,31 +2113,55 @@ class InstagramService {
                 return false;
             }, scrollContainer);
 
-            // STEP 3: If JS scroll didn't work, use mouse.wheel in the dialog center
+            // STEP 3: If JS scroll didn't work, use mouse.wheel
             if (!jsScrolled) {
-                // Find dialog and use mouse wheel directly
-                const dialogBox = await page.evaluate(() => {
-                    const dialog = document.querySelector('div[role="dialog"]');
-                    if (dialog) {
-                        const rect = dialog.getBoundingClientRect();
-                        return {
-                            x: rect.x + rect.width / 2,
-                            y: rect.y + rect.height / 2,
-                            found: true
-                        };
-                    }
-                    return { found: false };
-                });
-
-                if (dialogBox.found) {
-                    // Move mouse to center of dialog and scroll
-                    await page.mouse.move(dialogBox.x, dialogBox.y);
+                // First, check if we have feed panel coordinates from findScrollContainer
+                if (scrollContainer && scrollContainer.useFeedPanel && scrollContainer.panelCoords) {
+                    // Use coordinates from the detected inline comments panel
+                    await page.mouse.move(scrollContainer.panelCoords.x, scrollContainer.panelCoords.y);
                     await page.mouse.wheel(0, 500); // Scroll down 500px
-                    logger.info(`[SCROLL] 🖱️ Mouse wheel at (${Math.round(dialogBox.x)}, ${Math.round(dialogBox.y)})`);
+                    logger.info(`[SCROLL] 🖱️ Mouse wheel on feed panel at (${Math.round(scrollContainer.panelCoords.x)}, ${Math.round(scrollContainer.panelCoords.y)})`);
                 } else {
-                    // Last fallback: scroll window
-                    await page.evaluate(() => window.scrollBy(0, 600));
-                    logger.info('[SCROLL] Window scroll fallback');
+                    // Find dialog and use mouse wheel directly
+                    const dialogBox = await page.evaluate(() => {
+                        const dialog = document.querySelector('div[role="dialog"]');
+                        if (dialog) {
+                            const rect = dialog.getBoundingClientRect();
+                            return {
+                                x: rect.x + rect.width / 2,
+                                y: rect.y + rect.height / 2,
+                                found: true,
+                                type: 'dialog'
+                            };
+                        }
+
+                        // Try to find comments area on the right side of the post
+                        const article = document.querySelector('article');
+                        if (article) {
+                            // Comments are usually in the right half of the article
+                            const rect = article.getBoundingClientRect();
+                            // Use right side of article (where comments typically are)
+                            return {
+                                x: rect.x + rect.width * 0.75, // 75% from left (right side)
+                                y: rect.y + rect.height / 2,
+                                found: true,
+                                type: 'article-right'
+                            };
+                        }
+
+                        return { found: false };
+                    });
+
+                    if (dialogBox.found) {
+                        // Move mouse to center of dialog/article and scroll
+                        await page.mouse.move(dialogBox.x, dialogBox.y);
+                        await page.mouse.wheel(0, 500); // Scroll down 500px
+                        logger.info(`[SCROLL] 🖱️ Mouse wheel at ${dialogBox.type} (${Math.round(dialogBox.x)}, ${Math.round(dialogBox.y)})`);
+                    } else {
+                        // Last fallback: scroll window
+                        await page.evaluate(() => window.scrollBy(0, 600));
+                        logger.info('[SCROLL] Window scroll fallback');
+                    }
                 }
             }
 
@@ -2271,7 +2295,74 @@ class InstagramService {
                     };
                 }
 
-                // No modal, check article/page containers
+                // NEW: Check for feed-style view (comments panel on the right side of post)
+                // This is when you navigate directly to /p/XXX/ and comments are inline
+                const article = document.querySelector('article');
+                if (article) {
+                    console.log('[CONTAINER] Article found, checking for inline comments panel...');
+
+                    // In feed view, comments are in a scrollable section to the right
+                    // Look for any div that contains comments and is scrollable
+                    const allDivs = article.querySelectorAll('div');
+
+                    for (const div of allDivs) {
+                        const style = window.getComputedStyle(div);
+                        const overflowY = style.overflowY;
+                        const hasOverflow = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'hidden';
+                        const canScroll = div.scrollHeight > div.clientHeight + 50;
+                        const hasHeight = div.clientHeight > 200;
+
+                        // Check if this div contains comment-like content
+                        const containsCommentText = div.innerText?.includes('@') ||
+                            div.innerText?.includes('Responder') ||
+                            div.innerText?.includes('Reply');
+
+                        if (hasOverflow && canScroll && hasHeight && containsCommentText) {
+                            const rect = div.getBoundingClientRect();
+                            console.log(`[CONTAINER] ✅ Found inline comments panel: overflow=${overflowY}, height=${div.clientHeight}, scrollHeight=${div.scrollHeight}`);
+
+                            return {
+                                selector: null, // Will use coordinates instead
+                                name: 'inline-comments-panel',
+                                scrollable: true,
+                                useModal: false,
+                                useFeedPanel: true,
+                                panelCoords: {
+                                    x: rect.x + rect.width / 2,
+                                    y: rect.y + rect.height / 2
+                                },
+                                details: {
+                                    overflowY,
+                                    clientHeight: div.clientHeight,
+                                    scrollHeight: div.scrollHeight
+                                }
+                            };
+                        }
+                    }
+
+                    // Try to find comments section by looking for specific patterns
+                    const sections = article.querySelectorAll('section');
+                    for (const section of sections) {
+                        const canScroll = section.scrollHeight > section.clientHeight + 50;
+                        if (canScroll && section.clientHeight > 200) {
+                            const rect = section.getBoundingClientRect();
+                            console.log(`[CONTAINER] ✅ Found article section for comments`);
+                            return {
+                                selector: null,
+                                name: 'article-section',
+                                scrollable: true,
+                                useModal: false,
+                                useFeedPanel: true,
+                                panelCoords: {
+                                    x: rect.x + rect.width / 2,
+                                    y: rect.y + rect.height / 2
+                                }
+                            };
+                        }
+                    }
+                }
+
+                // Legacy: check article/page containers
                 const candidates = [
                     'article section:last-child',
                     'article > div > div:nth-child(2)',
