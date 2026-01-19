@@ -3606,11 +3606,52 @@ class InstagramService {
         }
 
         try {
+            // Filter out invalid DOM-extracted comments
+            const validComments = comments.filter(comment => {
+                // Skip if comment_id starts with 'dom_' and text is likely UI element
+                if (comment.comment_id?.startsWith('dom_')) {
+                    const text = (comment.text || '').trim().toLowerCase();
+
+                    // Invalid: Known UI elements
+                    const invalidTexts = ['perfil', 'reels', 'pesquisa', 'explorar', 'mensagens',
+                        'notificações', 'criar', 'painel', 'mais', 'search',
+                        'explore', 'messages', 'notifications', 'create', 'more'];
+                    if (invalidTexts.includes(text)) {
+                        logger.debug(`[FILTER] Removing UI element: "${comment.text}"`);
+                        return false;
+                    }
+
+                    // Invalid: Post description (contains "..." or "mais" at end)
+                    if (text.includes('...') && text.includes('mais')) {
+                        logger.debug(`[FILTER] Removing post description: "${comment.text?.substring(0, 50)}..."`);
+                        return false;
+                    }
+
+                    // Invalid: Very short text that's not an emoji (likely UI)
+                    if (text.length < 2 && !/[\u{1F300}-\u{1F9FF}]/u.test(text)) {
+                        logger.debug(`[FILTER] Removing short text: "${comment.text}"`);
+                        return false;
+                    }
+
+                    // Invalid: Same username as post author and looks like description
+                    if (comment.username?.toLowerCase() === 'governobarroalto' && text.length > 100) {
+                        logger.debug(`[FILTER] Removing post author description`);
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+
+            if (validComments.length < comments.length) {
+                logger.info(`[FILTER] Removed ${comments.length - validComments.length} invalid DOM comments`);
+            }
+
             // Deduplicate by comment_id and remove columns that don't exist in the database
             const uniqueComments = [];
             const seenIds = new Set();
 
-            for (const comment of comments) {
+            for (const comment of validComments) {
                 if (!seenIds.has(comment.comment_id)) {
                     seenIds.add(comment.comment_id);
                     // Remove fields that don't exist in the database schema
