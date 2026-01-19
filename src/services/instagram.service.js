@@ -1916,7 +1916,7 @@ class InstagramService {
 
         // First, diagnose and find the correct scroll container
         const scrollContainer = await this.findScrollContainer(page);
-        logger.info(`[SCROLL] Using container: ${scrollContainer || 'window (fallback)'}`);
+        logger.info(`[SCROLL] Using container: ${scrollContainer?.name || 'window (fallback)'} (useModal: ${scrollContainer?.useModal || false})`);
 
         // Try to open comments modal if not already open
         const commentsOpened = await this.openCommentsModal(page);
@@ -1961,22 +1961,43 @@ class InstagramService {
                 await randomDelay(2000, 3500);
             }
 
-            // STEP 2: Scroll in the correct container
-            await page.evaluate((containerSelector) => {
-                if (containerSelector) {
-                    const container = document.querySelector(containerSelector);
+            // STEP 2: Scroll in the correct container (using intelligent detection)
+            await page.evaluate((containerInfo) => {
+                // If modal is detected, find the scrollable element inside
+                if (containerInfo && containerInfo.useModal) {
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    if (dialog) {
+                        // Find the scrollable div inside the modal
+                        const allDivs = dialog.querySelectorAll('div');
+                        for (const div of allDivs) {
+                            const style = window.getComputedStyle(div);
+                            if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                                div.scrollHeight > div.clientHeight + 20) {
+                                console.log('[SCROLL] Scrolling modal inner div');
+                                div.scrollTop = div.scrollHeight;
+                                return;
+                            }
+                        }
+                        // Fallback: scroll the dialog itself
+                        console.log('[SCROLL] Scrolling modal dialog');
+                        dialog.scrollTop = dialog.scrollHeight;
+                        return;
+                    }
+                }
+
+                // Try selector if provided
+                if (containerInfo && containerInfo.selector) {
+                    const container = document.querySelector(containerInfo.selector);
                     if (container) {
+                        console.log('[SCROLL] Scrolling by selector:', containerInfo.selector);
                         container.scrollTop = container.scrollHeight;
                         return;
                     }
                 }
-                // Fallback: try modal, then window
-                const modal = document.querySelector('div[role="dialog"]');
-                if (modal) {
-                    modal.scrollTop = modal.scrollHeight;
-                } else {
-                    window.scrollBy(0, 600);
-                }
+
+                // Last fallback: scroll window
+                console.log('[SCROLL] Fallback: scrolling window');
+                window.scrollBy(0, 600);
             }, scrollContainer);
 
             // Wait for API to respond
@@ -2054,41 +2075,100 @@ class InstagramService {
 
     /**
      * Find the best scrollable container for comments
+     * Uses computed style to detect overflow properties
      * Returns CSS selector or null
      */
     async findScrollContainer(page) {
         try {
             const result = await page.evaluate(() => {
+                // First, check if there's a dialog/modal open
+                const dialog = document.querySelector('div[role="dialog"]');
+
+                if (dialog) {
+                    console.log('[CONTAINER] Modal detected, searching within modal...');
+
+                    // Find all divs inside the modal and check their computed overflow
+                    const allDivs = dialog.querySelectorAll('div');
+
+                    for (const div of allDivs) {
+                        const style = window.getComputedStyle(div);
+                        const overflowY = style.overflowY;
+                        const hasOverflow = overflowY === 'auto' || overflowY === 'scroll';
+                        const canScroll = div.scrollHeight > div.clientHeight + 20;
+                        const hasHeight = div.clientHeight > 100;
+
+                        if (hasOverflow && canScroll && hasHeight) {
+                            // Generate a unique selector for this element
+                            const tagName = div.tagName.toLowerCase();
+                            const classList = Array.from(div.classList).join('.');
+
+                            console.log(`[CONTAINER] ✅ Found scrollable in modal: overflow=${overflowY}, height=${div.clientHeight}, scrollHeight=${div.scrollHeight}`);
+
+                            return {
+                                selector: 'div[role="dialog"]',
+                                name: 'modal-scrollable',
+                                scrollable: true,
+                                details: {
+                                    overflowY,
+                                    clientHeight: div.clientHeight,
+                                    scrollHeight: div.scrollHeight,
+                                    classList: classList.substring(0, 50)
+                                },
+                                // Store the element index for later use
+                                useModal: true
+                            };
+                        }
+                    }
+
+                    // If no scrollable div found, just use the dialog itself
+                    console.log('[CONTAINER] No scrollable div in modal, using dialog');
+                    return {
+                        selector: 'div[role="dialog"]',
+                        name: 'modal-fallback',
+                        scrollable: true,
+                        useModal: true
+                    };
+                }
+
+                // No modal, check article/page containers
                 const candidates = [
-                    // Modal containers (highest priority for expanded comments)
-                    { sel: 'div[role="dialog"] > div > div > div:nth-child(2)', name: 'modal-inner' },
-                    { sel: 'div[role="dialog"] > div > div', name: 'modal-outer' },
-                    { sel: 'div[role="dialog"] ul', name: 'modal-list' },
-                    // Post page containers
-                    { sel: 'article section:last-child', name: 'article-section' },
-                    { sel: 'article > div > div:nth-child(2)', name: 'article-div' },
-                    // Overflow-based
-                    { sel: '[style*="overflow: auto"]', name: 'overflow-auto' },
-                    { sel: '[style*="overflow-y: scroll"]', name: 'overflow-scroll' },
+                    'article section:last-child',
+                    'article > div > div:nth-child(2)',
+                    '[style*="overflow-y: auto"]',
+                    '[style*="overflow-y: scroll"]',
+                    '[style*="overflow: auto"]'
                 ];
 
-                for (const { sel, name } of candidates) {
+                for (const sel of candidates) {
                     const el = document.querySelector(sel);
                     if (el && el.scrollHeight > el.clientHeight + 50) {
-                        console.log(`[CONTAINER] Found scrollable: ${name} (${el.scrollHeight}>${el.clientHeight})`);
-                        return { selector: sel, name, scrollable: true };
+                        console.log(`[CONTAINER] Found article container: ${sel}`);
+                        return {
+                            selector: sel,
+                            name: 'article-container',
+                            scrollable: true,
+                            useModal: false
+                        };
                     }
                 }
 
-                return { selector: null, name: 'none', scrollable: false };
+                return { selector: null, name: 'none', scrollable: false, useModal: false };
             });
 
-            logger.debug(`[SCROLL] Container diagnostic: ${result.name} (scrollable: ${result.scrollable})`);
-            return result.selector;
+            if (result.scrollable) {
+                logger.info(`[SCROLL] ✅ Found container: ${result.name} (${result.selector})`);
+                if (result.details) {
+                    logger.info(`[SCROLL] Container details: overflow=${result.details.overflowY}, height=${result.details.clientHeight}px, scroll=${result.details.scrollHeight}px`);
+                }
+            } else {
+                logger.warn('[SCROLL] ⚠️ No scrollable container found');
+            }
+
+            return result;
 
         } catch (error) {
-            logger.debug('[SCROLL] Could not find scroll container:', error.message);
-            return null;
+            logger.error('[SCROLL] Error finding scroll container:', error.message);
+            return { selector: null, name: 'error', scrollable: false, useModal: false };
         }
     }
 
