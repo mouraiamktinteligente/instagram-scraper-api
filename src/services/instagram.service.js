@@ -2782,7 +2782,7 @@ class InstagramService {
 
     /**
      * Aggressively scroll the modal/page to load ALL comments before DOM extraction
-     * Uses mouse.wheel directly in the comments area
+     * Detects view type (MODAL vs FEED_INLINE) and adapts scroll strategy
      * @param {Page} page 
      */
     async scrollModalToLoadAllComments(page) {
@@ -2790,81 +2790,135 @@ class InstagramService {
         const SCROLL_DELAY = 800;
 
         try {
-            logger.info('[MODAL-SCROLL] 🔄 Starting aggressive modal scroll to load all comments...');
+            // STEP 1: Detect view type
+            const viewType = await this.detectViewType(page);
+            logger.info(`[VIEW] 📱 Detected view type: ${viewType.type}`);
 
-            // Find the scrollable area - try multiple strategies
-            const scrollTarget = await page.evaluate(() => {
-                // Strategy 1: Find dialog/modal
-                const dialog = document.querySelector('div[role="dialog"]');
-                if (dialog) {
-                    const rect = dialog.getBoundingClientRect();
-                    // Use right side of dialog (where comments typically are)
-                    return {
-                        x: rect.x + rect.width * 0.7,
-                        y: rect.y + rect.height * 0.5,
-                        type: 'dialog',
-                        found: true
-                    };
+            if (viewType.type === 'MODAL') {
+                // MODAL VIEW: Comments are in a dialog overlay
+                logger.info('[MODAL-SCROLL] 🔄 Scrolling inside MODAL dialog...');
+
+                if (viewType.scrollTarget) {
+                    await page.mouse.move(viewType.scrollTarget.x, viewType.scrollTarget.y);
+                    logger.info(`[MODAL-SCROLL] Target: (${Math.round(viewType.scrollTarget.x)}, ${Math.round(viewType.scrollTarget.y)})`);
+
+                    for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                        await page.mouse.wheel(0, 500);
+                        await page.waitForTimeout(SCROLL_DELAY);
+
+                        if (await this.hasReachedCommentsBottom(page)) {
+                            logger.info(`[MODAL-SCROLL] Reached bottom after ${i + 1} scrolls`);
+                            break;
+                        }
+                    }
                 }
 
-                // Strategy 2: Find article and use right side (comments panel)
-                const article = document.querySelector('article');
-                if (article) {
-                    const rect = article.getBoundingClientRect();
-                    return {
-                        x: rect.x + rect.width * 0.75,
-                        y: rect.y + rect.height * 0.5,
-                        type: 'article',
-                        found: true
-                    };
+            } else if (viewType.type === 'FEED_INLINE') {
+                // FEED INLINE VIEW: Comments are on the right side of the post
+                logger.info('[FEED-SCROLL] 🔄 Scrolling FEED INLINE comments panel...');
+
+                if (viewType.scrollTarget) {
+                    await page.mouse.move(viewType.scrollTarget.x, viewType.scrollTarget.y);
+                    logger.info(`[FEED-SCROLL] Target: (${Math.round(viewType.scrollTarget.x)}, ${Math.round(viewType.scrollTarget.y)})`);
+
+                    for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                        await page.mouse.wheel(0, 600);
+                        await page.waitForTimeout(SCROLL_DELAY);
+
+                        if (await this.hasReachedCommentsBottom(page)) {
+                            logger.info(`[FEED-SCROLL] Reached bottom after ${i + 1} scrolls`);
+                            break;
+                        }
+                    }
                 }
 
-                // Strategy 3: Just use center-right of viewport
-                return {
-                    x: window.innerWidth * 0.7,
-                    y: window.innerHeight * 0.5,
-                    type: 'viewport',
-                    found: true
-                };
-            });
-
-            if (!scrollTarget.found) {
-                logger.warn('[MODAL-SCROLL] Could not find scroll target');
-                return;
-            }
-
-            logger.info(`[MODAL-SCROLL] Using scroll target: ${scrollTarget.type} at (${Math.round(scrollTarget.x)}, ${Math.round(scrollTarget.y)})`);
-
-            // Move mouse to the scroll target
-            await page.mouse.move(scrollTarget.x, scrollTarget.y);
-
-            // Scroll aggressively multiple times
-            for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-                await page.mouse.wheel(0, 600); // Scroll down 600px
-                await page.waitForTimeout(SCROLL_DELAY);
-
-                // Check if we've reached the bottom (by seeing if "Adicione um comentário" appears)
-                const reachedBottom = await page.evaluate(() => {
-                    const text = document.body.innerText;
-                    return text.includes('Adicione um comentário') ||
-                        text.includes('Add a comment') ||
-                        text.includes('Escreva um comentário');
-                });
-
-                if (i > 2 && reachedBottom) {
-                    logger.info(`[MODAL-SCROLL] Reached bottom after ${i + 1} scrolls`);
-                    break;
+            } else {
+                // UNKNOWN: Fall back to window scroll
+                logger.warn('[SCROLL] Unknown view type, using window scroll fallback');
+                for (let i = 0; i < 5; i++) {
+                    await page.evaluate(() => window.scrollBy(0, 500));
+                    await page.waitForTimeout(SCROLL_DELAY);
                 }
             }
 
-            // Final wait for any lazy-loaded content
+            // Final wait for lazy-loaded content
             await page.waitForTimeout(1000);
 
-            logger.info('[MODAL-SCROLL] ✅ Modal scroll complete');
+            logger.info('[SCROLL] ✅ Scroll complete');
 
         } catch (error) {
-            logger.warn('[MODAL-SCROLL] Error during modal scroll:', error.message);
+            logger.warn('[SCROLL] Error during scroll:', error.message);
         }
+    }
+
+    /**
+     * Detect the current Instagram view type
+     * @param {Page} page 
+     * @returns {Promise<{type: 'MODAL'|'FEED_INLINE'|'UNKNOWN', scrollTarget: {x, y}|null}>}
+     */
+    async detectViewType(page) {
+        return await page.evaluate(() => {
+            // Check for MODAL view (dialog overlay)
+            const dialog = document.querySelector('div[role="dialog"]');
+            if (dialog) {
+                const rect = dialog.getBoundingClientRect();
+                // Modal is typically centered and has significant size
+                if (rect.width > 300 && rect.height > 300) {
+                    return {
+                        type: 'MODAL',
+                        scrollTarget: {
+                            x: rect.x + rect.width * 0.7, // Right side of modal (comments)
+                            y: rect.y + rect.height * 0.5
+                        }
+                    };
+                }
+            }
+
+            // Check for FEED INLINE view (article with side comments)
+            const article = document.querySelector('article');
+            if (article) {
+                const rect = article.getBoundingClientRect();
+
+                // In feed inline view, comments are on the right side
+                const hasCommentArea = document.body.innerText.includes('Responder') ||
+                    document.body.innerText.includes('Reply') ||
+                    document.body.innerText.includes('curtida') ||
+                    document.body.innerText.includes('like');
+
+                if (hasCommentArea) {
+                    return {
+                        type: 'FEED_INLINE',
+                        scrollTarget: {
+                            x: rect.x + rect.width * 0.75, // 75% from left (comments panel)
+                            y: rect.y + rect.height * 0.5
+                        }
+                    };
+                }
+            }
+
+            // Fallback: use viewport center-right
+            return {
+                type: 'UNKNOWN',
+                scrollTarget: {
+                    x: window.innerWidth * 0.7,
+                    y: window.innerHeight * 0.5
+                }
+            };
+        });
+    }
+
+    /**
+     * Check if we've scrolled to the bottom of comments
+     * @param {Page} page 
+     * @returns {Promise<boolean>}
+     */
+    async hasReachedCommentsBottom(page) {
+        return await page.evaluate(() => {
+            const text = document.body.innerText;
+            return text.includes('Adicione um comentário') ||
+                text.includes('Add a comment') ||
+                text.includes('Escreva um comentário');
+        });
     }
 
     /**
