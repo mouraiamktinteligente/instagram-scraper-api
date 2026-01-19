@@ -18,6 +18,7 @@ const {
     randomDelay,
     extractPostId,
 } = require('../utils/helpers');
+const stealthService = require('./browser/stealth');
 
 // Initialize Supabase client
 const supabase = createClient(config.supabase.url, config.supabase.key);
@@ -178,6 +179,30 @@ class InstagramService {
                     }
                 } catch (aiError) {
                     logger.warn('[SCRAPE] AI full extraction failed:', aiError.message);
+                }
+            }
+
+            // Fallback 4: window._sharedData (quando GraphQL/DOM falham completamente)
+            if (comments.length < 5) {
+                logger.warn('[SCRAPE] Very few comments, trying window._sharedData fallback...');
+
+                const sharedDataComments = await this.extractSharedData(page, postId, postUrl);
+
+                if (sharedDataComments.length > 0) {
+                    logger.info(`[SCRAPE] ✅ window._sharedData rescued ${sharedDataComments.length} comments!`);
+
+                    // Merge com comentários existentes
+                    const existingTexts = new Set(comments.map(c => c.text?.substring(0, 40)));
+                    let added = 0;
+                    for (const sdComment of sharedDataComments) {
+                        const textKey = sdComment.text?.substring(0, 40);
+                        if (textKey && !existingTexts.has(textKey)) {
+                            comments.push(sdComment);
+                            existingTexts.add(textKey);
+                            added++;
+                        }
+                    }
+                    logger.info(`[SCRAPE] Added ${added} new comments from _sharedData (total: ${comments.length})`);
                 }
             }
 
@@ -1125,6 +1150,10 @@ class InstagramService {
             } catch (e) { }
         });
 
+        // Apply additional stealth patches from stealth service
+        logger.info('[STEALTH] Applying additional anti-detection patches...');
+        await stealthService.applyStealthPatches(context);
+
         return context;
     }
 
@@ -1631,7 +1660,11 @@ class InstagramService {
         }));
         logger.info('[SCRAPE] Post page state:', pageInfo);
 
-        await randomDelay(3000, 5000);
+        // Simular comportamento humano para evitar detecção
+        await this.humanDelay(1500, 3000);
+        await this.simulateHumanBehavior(page);
+
+        await randomDelay(2000, 4000);
     }
 
     /**
@@ -3175,6 +3208,142 @@ class InstagramService {
                 text.includes('Add a comment') ||
                 text.includes('Escreva um comentário');
         });
+    }
+
+    /**
+     * Extrai dados do window._sharedData (fallback quando GraphQL falha)
+     * @param {Page} page 
+     * @param {string} postId 
+     * @param {string} postUrl 
+     */
+    async extractSharedData(page, postId, postUrl) {
+        const comments = [];
+
+        try {
+            const sharedData = await page.evaluate(() => {
+                // Método 1: Tentar window._sharedData global
+                if (typeof window._sharedData !== 'undefined') {
+                    return window._sharedData;
+                }
+
+                // Método 2: Buscar em todos os scripts
+                const scripts = Array.from(document.querySelectorAll('script'));
+                for (const script of scripts) {
+                    const text = script.textContent || '';
+
+                    // Procurar window._sharedData
+                    if (text.includes('window._sharedData')) {
+                        try {
+                            const match = text.match(/window\._sharedData\s*=\s*(\{.+?\});/s);
+                            if (match && match[1]) {
+                                return JSON.parse(match[1]);
+                            }
+                        } catch (e) {
+                            console.error('Failed to parse _sharedData:', e);
+                        }
+                    }
+                }
+
+                // Método 3: Buscar por application/ld+json
+                const ldJson = document.querySelector('script[type="application/ld+json"]');
+                if (ldJson && ldJson.textContent) {
+                    try {
+                        return { ldJson: JSON.parse(ldJson.textContent) };
+                    } catch (e) {
+                        console.error('Failed to parse LD+JSON:', e);
+                    }
+                }
+
+                return null;
+            });
+
+            if (!sharedData) {
+                logger.warn('[SHARED-DATA] window._sharedData not found in page');
+                return [];
+            }
+
+            logger.info('[SHARED-DATA] ✅ Successfully extracted window._sharedData');
+
+            // Tentar extrair comentários do PostPage
+            if (sharedData.entry_data?.PostPage?.[0]?.graphql?.shortcode_media) {
+                const media = sharedData.entry_data.PostPage[0].graphql.shortcode_media;
+                const commentEdges = media.edge_media_to_parent_comment?.edges || [];
+
+                const timestamp = new Date().toISOString();
+                for (const edge of commentEdges) {
+                    if (edge.node?.text && edge.node?.owner?.username) {
+                        comments.push({
+                            comment_id: edge.node.id || `shared_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                            text: edge.node.text,
+                            username: edge.node.owner.username,
+                            created_at: edge.node.created_at ?
+                                new Date(edge.node.created_at * 1000).toISOString() : timestamp,
+                            post_id: postId,
+                            post_url: postUrl,
+                            user_id: edge.node.owner.id || '',
+                            profile_pic_url: edge.node.owner.profile_pic_url || '',
+                            like_count: edge.node.edge_liked_by?.count || 0
+                        });
+                    }
+                }
+
+                logger.info(`[SHARED-DATA] Extracted ${comments.length} comments from PostPage`);
+            }
+
+            return comments;
+        } catch (error) {
+            logger.error('[SHARED-DATA] Error extracting:', error.message);
+            return [];
+        }
+    }
+
+    /**
+     * Delay aleatório que simula comportamento humano
+     * @param {number} minMs 
+     * @param {number} maxMs 
+     */
+    async humanDelay(minMs = 500, maxMs = 2000) {
+        const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+        await new Promise(resolve => setTimeout(resolve, delay));
+    }
+
+    /**
+     * Simula movimento de mouse humano
+     * @param {Page} page 
+     */
+    async simulateHumanBehavior(page) {
+        try {
+            // Mouse movements aleatórios
+            const moves = Math.floor(Math.random() * 3) + 2; // 2-4 movimentos
+            for (let i = 0; i < moves; i++) {
+                const x = Math.floor(Math.random() * 1920);
+                const y = Math.floor(Math.random() * 1080);
+                await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 10) + 5 });
+                await this.humanDelay(100, 500);
+            }
+
+            // Scroll suave
+            await page.evaluate(() => {
+                window.scrollBy({
+                    top: Math.random() * 300 + 100,
+                    behavior: 'smooth'
+                });
+            });
+            await this.humanDelay(800, 1500);
+
+            // Scroll de volta
+            await page.evaluate(() => {
+                window.scrollBy({
+                    top: -(Math.random() * 200 + 50),
+                    behavior: 'smooth'
+                });
+            });
+            await this.humanDelay(500, 1000);
+
+            logger.info('[HUMAN-SIM] ✅ Human behavior simulation complete');
+        } catch (error) {
+            logger.warn('[HUMAN-SIM] Failed to simulate:', error.message);
+        }
     }
 
     /**
