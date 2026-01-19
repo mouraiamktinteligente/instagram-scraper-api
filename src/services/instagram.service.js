@@ -1967,6 +1967,66 @@ class InstagramService {
             await randomDelay(2500, 3500);
         }
 
+        // 📸 DEBUG SCREENSHOT: Capture state before scrolling
+        try {
+            const debugDir = '/tmp/instagram-debug';
+            const fs = require('fs');
+            if (!fs.existsSync(debugDir)) {
+                fs.mkdirSync(debugDir, { recursive: true });
+            }
+
+            const timestamp = Date.now();
+            const screenshotPath = `${debugDir}/before-scroll-${timestamp}.png`;
+            await page.screenshot({ path: screenshotPath, fullPage: false });
+            logger.info(`[DEBUG] 📸 Screenshot saved: ${screenshotPath}`);
+
+            // Also capture DOM info about the dialog
+            const dialogInfo = await page.evaluate(() => {
+                const dialog = document.querySelector('div[role="dialog"]');
+                if (!dialog) return { exists: false };
+
+                const rect = dialog.getBoundingClientRect();
+                const allDivs = dialog.querySelectorAll('div');
+                const scrollableDivs = [];
+
+                for (const div of allDivs) {
+                    const style = window.getComputedStyle(div);
+                    const overflowY = style.overflowY;
+                    const scrollable = div.scrollHeight > div.clientHeight;
+
+                    if (scrollable && div.clientHeight > 50) {
+                        scrollableDivs.push({
+                            overflowY,
+                            clientHeight: div.clientHeight,
+                            scrollHeight: div.scrollHeight,
+                            scrollTop: div.scrollTop,
+                            className: div.className?.substring(0, 30) || 'no-class'
+                        });
+                    }
+                }
+
+                return {
+                    exists: true,
+                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    totalDivs: allDivs.length,
+                    scrollableDivs: scrollableDivs.slice(0, 5), // First 5
+                    innerText: dialog.innerText?.substring(0, 200) || ''
+                };
+            });
+
+            logger.info(`[DEBUG] 🔍 Dialog info: exists=${dialogInfo.exists}`);
+            if (dialogInfo.exists) {
+                logger.info(`[DEBUG] Dialog rect: ${JSON.stringify(dialogInfo.rect)}`);
+                logger.info(`[DEBUG] Total divs: ${dialogInfo.totalDivs}, Scrollable: ${dialogInfo.scrollableDivs.length}`);
+                if (dialogInfo.scrollableDivs.length > 0) {
+                    logger.info(`[DEBUG] Scrollable divs: ${JSON.stringify(dialogInfo.scrollableDivs)}`);
+                }
+                logger.info(`[DEBUG] Dialog text preview: "${dialogInfo.innerText.substring(0, 100)}..."`);
+            }
+        } catch (debugError) {
+            logger.warn(`[DEBUG] Screenshot error: ${debugError.message}`);
+        }
+
         for (let i = 0; i < MAX_SCROLLS; i++) {
             const currentGraphQLCount = commentsArray.length;
             const timestamp = new Date().toISOString().substr(11, 8);
