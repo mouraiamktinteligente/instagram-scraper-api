@@ -1551,7 +1551,8 @@ class InstagramService {
     }
 
     /**
-     * Navigate to the Instagram post
+     * Navigate to the Instagram post with layout detection and FEED INLINE forcing
+     * Instagram serves 2 different layouts - we need FEED_INLINE for reliable scraping
      * @param {Page} page
      * @param {string} postUrl
      */
@@ -1567,6 +1568,19 @@ class InstagramService {
 
         logger.info('[SCRAPE] Navigating to post:', postUrl);
 
+        // STRATEGY 1: First load Instagram feed to initialize session properly
+        logger.info('[SCRAPE] Loading Instagram feed first (ensures proper session)...');
+        try {
+            await page.goto('https://www.instagram.com/', {
+                waitUntil: 'domcontentloaded',
+                timeout: 30000,
+            });
+            await page.waitForTimeout(2000);
+        } catch (e) {
+            logger.warn('[SCRAPE] Feed pre-load failed, continuing directly...');
+        }
+
+        // Navigate to post
         await page.goto(postUrl, {
             waitUntil: 'domcontentloaded',
             timeout: config.scraping.pageTimeout,
@@ -1577,6 +1591,7 @@ class InstagramService {
         try {
             await page.waitForFunction(() => {
                 return document.querySelector('article') !== null ||
+                    document.querySelector('div[role="dialog"]') !== null ||
                     document.querySelectorAll('img').length > 2 ||
                     document.body.innerText.length > 500;
             }, { timeout: 30000 });
@@ -1588,17 +1603,191 @@ class InstagramService {
         // Wait for network to settle
         await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
 
+        // LAYOUT DETECTION: Check which layout Instagram served
+        const layoutInfo = await this.detectLayoutType(page);
+        logger.info('[LAYOUT] Detected layout:', layoutInfo);
+
+        // If MODAL_POST_VIEW detected, try to convert to FEED_INLINE
+        if (layoutInfo.layoutType === 'MODAL_POST_VIEW') {
+            logger.warn('[LAYOUT] ⚠️ MODAL_POST_VIEW detected - may have limited scroll. Trying workarounds...');
+
+            // The modal/post view is still usable, we just need different scroll strategy
+            // Store layout type for later use in scroll functions
+            this.currentLayoutType = 'MODAL_POST_VIEW';
+            this.layoutInfo = layoutInfo;
+        } else {
+            this.currentLayoutType = layoutInfo.layoutType;
+            this.layoutInfo = layoutInfo;
+        }
+
         // Log current page state
         const pageInfo = await page.evaluate(() => ({
             url: window.location.href,
             title: document.title,
             hasArticle: !!document.querySelector('article'),
+            hasDialog: !!document.querySelector('div[role="dialog"]'),
             imgCount: document.querySelectorAll('img').length,
             textLength: document.body?.innerText?.length || 0
         }));
         logger.info('[SCRAPE] Post page state:', pageInfo);
 
         await randomDelay(3000, 5000);
+    }
+
+    /**
+     * Detect which layout Instagram is serving
+     * @param {Page} page 
+     * @returns {Promise<Object>} Layout information
+     */
+    async detectLayoutType(page) {
+        const detection = await page.evaluate(() => {
+            const article = document.querySelector('article');
+            const dialog = document.querySelector('div[role="dialog"]');
+            const video = document.querySelector('video');
+
+            // Indicators for MODAL_POST_VIEW
+            const hasFollowButton = Array.from(document.querySelectorAll('button'))
+                .some(b => b.textContent.includes('Seguir') || b.textContent.includes('Follow'));
+            const hasLargeVideo = video && video.offsetWidth > 400;
+            const hasLikeSection = !!document.querySelector('section span') ||
+                document.body.innerText.includes('curtida') ||
+                document.body.innerText.includes('like');
+
+            // Indicators for FEED_INLINE
+            const hasFeedComments = article?.querySelector('section ul') || article?.querySelector('ul');
+            const hasSidebar = !!document.querySelector('nav') ||
+                !!document.querySelector('a[href="/"]');
+
+            // Get rects for scroll targeting
+            const articleRect = article?.getBoundingClientRect();
+            const dialogRect = dialog?.getBoundingClientRect();
+
+            // Count visible comment-like elements
+            const commentElements = document.querySelectorAll('ul li');
+            const visibleComments = Array.from(commentElements).filter(li => {
+                const text = li.innerText || '';
+                return text.includes('@') || text.includes('Responder') || text.includes('Reply');
+            }).length;
+
+            return {
+                hasArticle: !!article,
+                hasDialog: !!dialog,
+                hasFollowButton,
+                hasLargeVideo,
+                hasLikeSection,
+                hasFeedComments: !!hasFeedComments,
+                hasSidebar,
+                articleRect: articleRect ? {
+                    width: articleRect.width,
+                    height: articleRect.height,
+                    x: articleRect.x,
+                    y: articleRect.y
+                } : null,
+                dialogRect: dialogRect ? {
+                    width: dialogRect.width,
+                    height: dialogRect.height,
+                    x: dialogRect.x,
+                    y: dialogRect.y
+                } : null,
+                videoWidth: video?.offsetWidth || 0,
+                visibleComments
+            };
+        });
+
+        // Determine layout type based on indicators
+        let layoutType = 'UNKNOWN';
+
+        // MODAL_POST_VIEW: Has dialog, or large video with follow button
+        if (detection.hasDialog || (detection.hasLargeVideo && detection.hasFollowButton)) {
+            layoutType = 'MODAL_POST_VIEW';
+        }
+        // FEED_INLINE: Has article with feed-style comments
+        else if (detection.hasArticle && (detection.hasFeedComments || detection.hasSidebar)) {
+            layoutType = 'FEED_INLINE';
+        }
+        // Has article but unknown structure - default to FEED_INLINE
+        else if (detection.hasArticle) {
+            layoutType = 'FEED_INLINE';
+        }
+
+        return {
+            layoutType,
+            ...detection
+        };
+    }
+
+    /**
+     * Get the optimal scroll strategy based on layout type
+     * @param {Page} page 
+     * @returns {Promise<Object>} Scroll strategy with coords and type
+     */
+    async getScrollStrategy(page) {
+        const layoutType = this.currentLayoutType || 'UNKNOWN';
+
+        return await page.evaluate((layout) => {
+            if (layout === 'MODAL_POST_VIEW') {
+                // Modal/Post view: scroll the comments panel (usually on the right)
+                const dialog = document.querySelector('div[role="dialog"]');
+                const article = document.querySelector('article');
+
+                // Find scrollable container in dialog or article
+                const containers = [
+                    dialog?.querySelector('section'),
+                    dialog?.querySelector('ul'),
+                    article?.querySelector('section'),
+                    article?.querySelector('div[style*="overflow"]')
+                ].filter(Boolean);
+
+                for (const container of containers) {
+                    if (container.scrollHeight > container.clientHeight + 50) {
+                        const rect = container.getBoundingClientRect();
+                        return {
+                            type: 'ELEMENT_SCROLL',
+                            selector: container.tagName.toLowerCase(),
+                            coords: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+                            elementInfo: { scrollHeight: container.scrollHeight, clientHeight: container.clientHeight }
+                        };
+                    }
+                }
+
+                // Fallback: use mouse wheel on right side of screen
+                const rect = (dialog || article)?.getBoundingClientRect();
+                if (rect) {
+                    return {
+                        type: 'WHEEL_SCROLL',
+                        coords: { x: rect.x + rect.width * 0.75, y: rect.y + rect.height * 0.5 }
+                    };
+                }
+            } else {
+                // FEED_INLINE: scroll the comments list directly
+                const commentsList = document.querySelector('article section ul') ||
+                    document.querySelector('article ul');
+                if (commentsList) {
+                    const rect = commentsList.getBoundingClientRect();
+                    return {
+                        type: 'ELEMENT_SCROLL',
+                        selector: 'article ul',
+                        coords: { x: rect.x + rect.width / 2, y: rect.y + 100 }
+                    };
+                }
+
+                // Fallback: use article right side
+                const article = document.querySelector('article');
+                if (article) {
+                    const rect = article.getBoundingClientRect();
+                    return {
+                        type: 'WHEEL_SCROLL',
+                        coords: { x: rect.x + rect.width * 0.75, y: rect.y + rect.height * 0.5 }
+                    };
+                }
+            }
+
+            // Ultimate fallback
+            return {
+                type: 'WINDOW_SCROLL',
+                coords: { x: window.innerWidth * 0.7, y: window.innerHeight * 0.5 }
+            };
+        }, layoutType);
     }
 
     /**
@@ -2800,59 +2989,71 @@ class InstagramService {
 
     /**
      * Aggressively scroll the modal/page to load ALL comments before DOM extraction
-     * Detects view type (MODAL vs FEED_INLINE) and adapts scroll strategy
+     * Uses getScrollStrategy to pick the best scroll method based on layout type
      * @param {Page} page 
      */
     async scrollModalToLoadAllComments(page) {
-        const MAX_SCROLL_ATTEMPTS = 10;
+        const MAX_SCROLL_ATTEMPTS = 12;
         const SCROLL_DELAY = 800;
 
         try {
-            // STEP 1: Detect view type
-            const viewType = await this.detectViewType(page);
-            logger.info(`[VIEW] 📱 Detected view type: ${viewType.type}`);
+            // Use stored layout type or detect on the fly
+            const layoutType = this.currentLayoutType || 'UNKNOWN';
+            logger.info(`[SCROLL] 📱 Layout type: ${layoutType}`);
 
-            if (viewType.type === 'MODAL') {
-                // MODAL VIEW: Comments are in a dialog overlay
-                logger.info('[MODAL-SCROLL] 🔄 Scrolling inside MODAL dialog...');
+            // Get optimal scroll strategy
+            const strategy = await this.getScrollStrategy(page);
+            logger.info(`[SCROLL] Using strategy: ${strategy.type} at (${Math.round(strategy.coords?.x || 0)}, ${Math.round(strategy.coords?.y || 0)})`);
 
-                if (viewType.scrollTarget) {
-                    await page.mouse.move(viewType.scrollTarget.x, viewType.scrollTarget.y);
-                    logger.info(`[MODAL-SCROLL] Target: (${Math.round(viewType.scrollTarget.x)}, ${Math.round(viewType.scrollTarget.y)})`);
+            if (strategy.type === 'ELEMENT_SCROLL') {
+                // Scroll via JavaScript on the specific element
+                logger.info(`[SCROLL] 🔄 Scrolling element with selector: ${strategy.selector}`);
 
-                    for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-                        await page.mouse.wheel(0, 500);
-                        await page.waitForTimeout(SCROLL_DELAY);
-
-                        if (await this.hasReachedCommentsBottom(page)) {
-                            logger.info(`[MODAL-SCROLL] Reached bottom after ${i + 1} scrolls`);
-                            break;
+                for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                    // Try scrolling by selector and also by coords with wheel
+                    await page.evaluate(() => {
+                        // Find any scrollable element and scroll it
+                        const scrollables = document.querySelectorAll('section, ul, div[style*="overflow"]');
+                        for (const el of scrollables) {
+                            if (el.scrollHeight > el.clientHeight + 50) {
+                                el.scrollTop += 400;
+                            }
                         }
+                    });
+
+                    // Also use mouse wheel as backup
+                    if (strategy.coords) {
+                        await page.mouse.move(strategy.coords.x, strategy.coords.y);
+                        await page.mouse.wheel(0, 400);
+                    }
+
+                    await page.waitForTimeout(SCROLL_DELAY);
+
+                    if (await this.hasReachedCommentsBottom(page)) {
+                        logger.info(`[SCROLL] Reached bottom after ${i + 1} scrolls`);
+                        break;
                     }
                 }
 
-            } else if (viewType.type === 'FEED_INLINE') {
-                // FEED INLINE VIEW: Comments are on the right side of the post
-                logger.info('[FEED-SCROLL] 🔄 Scrolling FEED INLINE comments panel...');
+            } else if (strategy.type === 'WHEEL_SCROLL') {
+                // Scroll via mouse wheel at specific coordinates
+                logger.info(`[SCROLL] 🔄 Using mouse wheel at (${Math.round(strategy.coords.x)}, ${Math.round(strategy.coords.y)})`);
 
-                if (viewType.scrollTarget) {
-                    await page.mouse.move(viewType.scrollTarget.x, viewType.scrollTarget.y);
-                    logger.info(`[FEED-SCROLL] Target: (${Math.round(viewType.scrollTarget.x)}, ${Math.round(viewType.scrollTarget.y)})`);
+                await page.mouse.move(strategy.coords.x, strategy.coords.y);
 
-                    for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-                        await page.mouse.wheel(0, 600);
-                        await page.waitForTimeout(SCROLL_DELAY);
+                for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+                    await page.mouse.wheel(0, 500);
+                    await page.waitForTimeout(SCROLL_DELAY);
 
-                        if (await this.hasReachedCommentsBottom(page)) {
-                            logger.info(`[FEED-SCROLL] Reached bottom after ${i + 1} scrolls`);
-                            break;
-                        }
+                    if (await this.hasReachedCommentsBottom(page)) {
+                        logger.info(`[SCROLL] Reached bottom after ${i + 1} scrolls`);
+                        break;
                     }
                 }
 
             } else {
-                // UNKNOWN: Fall back to window scroll
-                logger.warn('[SCROLL] Unknown view type, using window scroll fallback');
+                // WINDOW_SCROLL: Fall back to window scroll
+                logger.warn('[SCROLL] Using window scroll fallback');
                 for (let i = 0; i < 5; i++) {
                     await page.evaluate(() => window.scrollBy(0, 500));
                     await page.waitForTimeout(SCROLL_DELAY);
