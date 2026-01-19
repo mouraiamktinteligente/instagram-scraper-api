@@ -100,11 +100,14 @@ class InstagramService {
 
             // Try to expand all comments (click "View all X comments" button)
             const expanded = await this.expandAllComments(page);
-            if (expanded) {
+            if (expanded === true) {
                 // ⭐ CRITICAL: Wait for GraphQL API to respond BEFORE scrolling
                 logger.info('[SCRAPE] ⏳ Waiting for initial GraphQL response...');
                 const initialCount = await this.waitForInitialGraphQLResponse(page, comments, 60000);
                 logger.info(`[SCRAPE] ✅ Initial GraphQL loaded: ${initialCount} comments`);
+            } else if (expanded === 'SCROLL_DIRECTLY') {
+                // Comments are already visible in feed panel, scroll directly to load more
+                logger.info('[SCRAPE] 📜 Comments visible without expand button, scrolling directly...');
             }
 
             // Scroll to load more comments (with optional limit)
@@ -1913,16 +1916,20 @@ class InstagramService {
                 const rect = div.getBoundingClientRect();
 
                 // Look for scrollable divs on the right side
+                // IMPORTANT: Validate that element is visible in viewport (positive coords)
                 if (rect.x > window.innerWidth * 0.4 && rect.width > 200 && rect.height > 200) {
-                    if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                        return {
-                            type: 'WHEEL_SCROLL',
-                            selector: 'div-overflow',
-                            coords: {
-                                x: rect.x + rect.width * 0.5,
-                                y: rect.y + rect.height * 0.5
-                            }
-                        };
+                    // Check coords are positive and within viewport
+                    if (rect.y >= 0 && rect.y < window.innerHeight) {
+                        if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                            return {
+                                type: 'WHEEL_SCROLL',
+                                selector: 'div-overflow',
+                                coords: {
+                                    x: Math.max(100, Math.min(rect.x + rect.width * 0.5, window.innerWidth - 100)),
+                                    y: Math.max(100, Math.min(rect.y + rect.height * 0.5, window.innerHeight - 100))
+                                }
+                            };
+                        }
                     }
                 }
             }
@@ -2293,6 +2300,28 @@ class InstagramService {
 
             if (diagnosticInfo.foundElements.length === 0) {
                 logger.error('[SCRAPE] ⚠️ NO elements found with "comentário" or "comment" text!');
+
+                // FALLBACK: Check if comments are already visible in the feed inline panel
+                // This happens when Instagram shows comments directly without a "View all" button
+                const hasVisibleComments = await page.evaluate(() => {
+                    const lists = document.querySelectorAll('ul');
+                    for (const ul of lists) {
+                        const items = ul.querySelectorAll('li');
+                        for (const li of items) {
+                            const text = li.innerText || '';
+                            if (text.includes('@') && (text.includes('Responder') || text.includes('Reply'))) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                });
+
+                if (hasVisibleComments) {
+                    logger.info('[SCRAPE] ✅ Comments already visible in feed panel, will scroll to load more');
+                    return 'SCROLL_DIRECTLY'; // Special return to indicate scroll without expand
+                }
+
                 logger.error('[SCRAPE] ⚠️ Post may have comments disabled or page structure changed');
             } else {
                 diagnosticInfo.foundElements.forEach((el, i) => {
