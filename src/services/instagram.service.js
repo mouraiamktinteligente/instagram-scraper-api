@@ -95,6 +95,14 @@ class InstagramService {
             // Extract post metadata (author, description, likes)
             const postMetadata = await this.extractPostMetadata(page);
 
+            // ⭐ RESET PAGE POSITION: Scroll to top to ensure proper viewport
+            // This fixes issues where page loads with partial scroll, causing elements to be off-screen
+            logger.info('[SCRAPE] 🔄 Resetting page position (scroll to top)...');
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await randomDelay(300, 500);
+            await page.evaluate(() => window.scrollTo(0, 0)); // Second scroll to ensure
+            await randomDelay(500, 800);
+
             // Wait for comments to load
             await this.waitForComments(page);
 
