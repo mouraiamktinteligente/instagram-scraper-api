@@ -109,6 +109,29 @@ class InstagramService {
             // Scroll to load more comments (with optional limit)
             await this.scrollForMoreComments(page, maxComments, comments);
 
+            // NEW FALLBACK: Extract visible comments from DOM directly (after scroll)
+            // This catches comments that are visible in the modal/page but not intercepted via GraphQL
+            if (comments.length < 20) {
+                logger.info('[SCRAPE] 📥 Extracting visible comments from DOM...');
+                const visibleComments = await this.extractVisibleCommentsFromDOM(page, postId, postUrl);
+                if (visibleComments.length > 0) {
+                    logger.info(`[SCRAPE] DOM extraction found ${visibleComments.length} comments`);
+
+                    // Merge with existing, avoiding duplicates by text prefix
+                    const existingTexts = new Set(comments.map(c => c.text?.substring(0, 40)));
+                    let added = 0;
+                    for (const domComment of visibleComments) {
+                        const textKey = domComment.text?.substring(0, 40);
+                        if (textKey && !existingTexts.has(textKey)) {
+                            comments.push(domComment);
+                            existingTexts.add(textKey);
+                            added++;
+                        }
+                    }
+                    logger.info(`[SCRAPE] Added ${added} new comments from DOM (total: ${comments.length})`);
+                }
+            }
+
             // Fallback 1: Extract comments from script tags (preloaded data)
             if (comments.length === 0) {
                 logger.info('[SCRAPE] Trying to extract from script tags...');
@@ -2613,6 +2636,142 @@ class InstagramService {
 
         } catch (error) {
             logger.error('[SCRAPE] Error extracting comments from DOM:', error.message);
+        }
+
+        return comments;
+    }
+
+    /**
+     * Extract visible comments directly from the current page DOM
+     * This is used when comments are visible in the modal/page but not captured via GraphQL
+     * @param {Page} page 
+     * @param {string} postId 
+     * @param {string} postUrl 
+     * @returns {Promise<Array>}
+     */
+    async extractVisibleCommentsFromDOM(page, postId, postUrl) {
+        const comments = [];
+
+        try {
+            // Extract all visible comments from the page
+            const extractedData = await page.evaluate(() => {
+                const results = [];
+
+                // Strategy 1: Look for comment elements containing username links and text
+                // Instagram comments typically have: <a href="/username">username</a> followed by <span>comment text</span>
+
+                // Find all links that look like usernames (start with / and are short)
+                const allLinks = document.querySelectorAll('a[href^="/"]');
+
+                for (const link of allLinks) {
+                    const href = link.getAttribute('href');
+                    // Skip non-username links
+                    if (!href || href.includes('/p/') || href.includes('/explore') ||
+                        href.includes('/accounts') || href.length > 50 || href.split('/').length > 3) {
+                        continue;
+                    }
+
+                    // Extract potential username
+                    const username = href.replace(/^\//, '').replace(/\/$/, '');
+                    if (!username || username.length < 2 || username.length > 30 || username.includes(' ')) {
+                        continue;
+                    }
+
+                    // Look for text near this username link
+                    // Check parent, siblings, and nearby elements
+                    const parent = link.parentElement;
+                    const grandparent = parent?.parentElement;
+                    const container = grandparent?.parentElement;
+
+                    // Try to find comment text in various positions
+                    let commentText = null;
+
+                    // Check siblings of the link
+                    if (parent) {
+                        const spans = parent.querySelectorAll('span');
+                        for (const span of spans) {
+                            const text = span.innerText?.trim();
+                            if (text && text.length > 0 && text.length < 2000 && text !== username) {
+                                // Skip timestamps and other short labels
+                                if (text.match(/^\d+\s*(sem|min|h|d|w|m|y|s)$/)) continue;
+                                if (text === 'Responder' || text === 'Reply') continue;
+                                if (text === 'Ver respostas' || text === 'View replies') continue;
+                                if (text.startsWith('Ver ') || text.startsWith('View ')) continue;
+                                commentText = text;
+                                break;
+                            }
+                        }
+                    }
+
+                    // If not found, check grandparent
+                    if (!commentText && grandparent) {
+                        const spans = grandparent.querySelectorAll('span[dir="auto"]');
+                        for (const span of spans) {
+                            const text = span.innerText?.trim();
+                            if (text && text.length > 0 && text.length < 2000 && text !== username &&
+                                !text.match(/^\d+\s*(sem|min|h|d|w|m|y|s)$/) &&
+                                text !== 'Responder' && text !== 'Reply') {
+                                commentText = text;
+                                break;
+                            }
+                        }
+                    }
+
+                    // If still not found, try container
+                    if (!commentText && container) {
+                        const spans = container.querySelectorAll('span[dir="auto"]');
+                        for (const span of spans) {
+                            const text = span.innerText?.trim();
+                            if (text && text.length > 3 && text.length < 2000 && text !== username &&
+                                !text.match(/^\d+\s*(sem|min|h|d|w|m|y|s)$/) &&
+                                text !== 'Responder' && text !== 'Reply') {
+                                commentText = text;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (commentText && username) {
+                        // Avoid duplicates
+                        const isDuplicate = results.some(r =>
+                            r.username === username && r.text === commentText
+                        );
+
+                        if (!isDuplicate) {
+                            results.push({
+                                username,
+                                text: commentText
+                            });
+                        }
+                    }
+                }
+
+                return results;
+            });
+
+            // Convert to standard comment format
+            const timestamp = new Date().toISOString();
+            for (const item of extractedData) {
+                if (item.username && item.text) {
+                    comments.push({
+                        comment_id: `dom_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                        text: item.text,
+                        username: item.username,
+                        created_at: timestamp,
+                        post_id: postId,
+                        post_url: postUrl,
+                        user_id: '',
+                        profile_pic_url: '',
+                        like_count: 0,
+                        extracted_from: 'dom'
+                    });
+                }
+            }
+
+            logger.info(`[DOM] Extracted ${comments.length} visible comments from page`);
+
+        } catch (error) {
+            logger.error('[DOM] Error extracting visible comments:', error.message);
         }
 
         return comments;
