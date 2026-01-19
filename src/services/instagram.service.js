@@ -1175,6 +1175,12 @@ class InstagramService {
                     }
 
                     logger.info(`[INTERCEPT] Total comments so far: ${comments.length} (${commentExtractor.getStats().uniqueHashes} unique hashes)`);
+
+                    // ⭐ LOG PAGINATION INFO to understand if more comments are available
+                    const paginationInfo = this.extractPaginationInfo(data);
+                    if (paginationInfo) {
+                        logger.info(`[INTERCEPT] 📄 Pagination: has_next_page=${paginationInfo.hasNextPage}, cursor=${paginationInfo.endCursor ? paginationInfo.endCursor.substring(0, 30) + '...' : 'none'}`);
+                    }
                 }
 
             } catch (e) {
@@ -1311,6 +1317,42 @@ class InstagramService {
             if (typeof obj[key] === 'object' && !Array.isArray(obj[key])) {
                 const result = this.findCommentPath(obj[key], `${path}.${key}`, depth + 1);
                 if (result) return result;
+            }
+        }
+
+        return null;
+    }
+    /**
+     * Extract pagination information from GraphQL response
+     * Looks for has_next_page and end_cursor in the response
+     */
+    extractPaginationInfo(obj, depth = 0) {
+        if (depth > 15 || !obj) return null;
+
+        // Check if this object directly has pagination info
+        if (obj.page_info && typeof obj.page_info === 'object') {
+            return {
+                hasNextPage: obj.page_info.has_next_page || false,
+                endCursor: obj.page_info.end_cursor || null
+            };
+        }
+
+        // Also check for has_next_page at this level
+        if ('has_next_page' in obj && 'end_cursor' in obj) {
+            return {
+                hasNextPage: obj.has_next_page || false,
+                endCursor: obj.end_cursor || null
+            };
+        }
+
+        // Recursively search in nested objects
+        if (typeof obj === 'object') {
+            for (const key of Object.keys(obj)) {
+                const value = obj[key];
+                if (value && typeof value === 'object' && !Array.isArray(value)) {
+                    const result = this.extractPaginationInfo(value, depth + 1);
+                    if (result) return result;
+                }
             }
         }
 
