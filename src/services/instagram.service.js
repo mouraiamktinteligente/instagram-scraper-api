@@ -2762,8 +2762,7 @@ class InstagramService {
                         post_url: postUrl,
                         user_id: '',
                         profile_pic_url: '',
-                        like_count: 0,
-                        extracted_from: 'dom'
+                        like_count: 0
                     });
                 }
             }
