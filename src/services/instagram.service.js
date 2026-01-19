@@ -2411,6 +2411,24 @@ class InstagramService {
                     }
                 }
 
+                // FALLBACK: If article exists but no scrollable container found,
+                // still return article coords for mouse.wheel scroll
+                if (article) {
+                    const rect = article.getBoundingClientRect();
+                    console.log('[CONTAINER] No scrollable found, using article fallback');
+                    return {
+                        selector: null,
+                        name: 'article-fallback',
+                        scrollable: false, // No JS scroll, but we can use mouse.wheel
+                        useModal: false,
+                        useFeedPanel: true,
+                        panelCoords: {
+                            x: rect.x + rect.width * 0.75, // Right side (comments)
+                            y: rect.y + rect.height * 0.5
+                        }
+                    };
+                }
+
                 return { selector: null, name: 'none', scrollable: false, useModal: false };
             });
 
@@ -2852,59 +2870,96 @@ class InstagramService {
     }
 
     /**
-     * Detect the current Instagram view type
+     * Detect the current Instagram view type with detailed logging
      * @param {Page} page 
-     * @returns {Promise<{type: 'MODAL'|'FEED_INLINE'|'UNKNOWN', scrollTarget: {x, y}|null}>}
+     * @returns {Promise<{type: 'MODAL'|'FEED_INLINE'|'UNKNOWN', scrollTarget: {x, y}|null, debug: object}>}
      */
     async detectViewType(page) {
-        return await page.evaluate(() => {
-            // Check for MODAL view (dialog overlay)
+        const debug = await page.evaluate(() => {
+            const result = {
+                hasDialog: false,
+                dialogRect: null,
+                hasArticle: false,
+                articleRect: null,
+                hasCommentIndicators: false,
+                indicators: [],
+                bodyTextSample: ''
+            };
+
+            // Check for dialog
             const dialog = document.querySelector('div[role="dialog"]');
             if (dialog) {
+                result.hasDialog = true;
                 const rect = dialog.getBoundingClientRect();
-                // Modal is typically centered and has significant size
-                if (rect.width > 300 && rect.height > 300) {
-                    return {
-                        type: 'MODAL',
-                        scrollTarget: {
-                            x: rect.x + rect.width * 0.7, // Right side of modal (comments)
-                            y: rect.y + rect.height * 0.5
-                        }
-                    };
-                }
+                result.dialogRect = { width: rect.width, height: rect.height, x: rect.x, y: rect.y };
             }
 
-            // Check for FEED INLINE view (article with side comments)
+            // Check for article
             const article = document.querySelector('article');
             if (article) {
+                result.hasArticle = true;
                 const rect = article.getBoundingClientRect();
-
-                // In feed inline view, comments are on the right side
-                const hasCommentArea = document.body.innerText.includes('Responder') ||
-                    document.body.innerText.includes('Reply') ||
-                    document.body.innerText.includes('curtida') ||
-                    document.body.innerText.includes('like');
-
-                if (hasCommentArea) {
-                    return {
-                        type: 'FEED_INLINE',
-                        scrollTarget: {
-                            x: rect.x + rect.width * 0.75, // 75% from left (comments panel)
-                            y: rect.y + rect.height * 0.5
-                        }
-                    };
-                }
+                result.articleRect = { width: rect.width, height: rect.height, x: rect.x, y: rect.y };
             }
 
-            // Fallback: use viewport center-right
-            return {
-                type: 'UNKNOWN',
-                scrollTarget: {
-                    x: window.innerWidth * 0.7,
-                    y: window.innerHeight * 0.5
+            // Check for comment indicators in body
+            const bodyText = document.body.innerText || '';
+            result.bodyTextSample = bodyText.substring(0, 500);
+
+            const indicators = ['Responder', 'Reply', 'curtida', 'like', 'comentário', 'comment', '@'];
+            for (const ind of indicators) {
+                if (bodyText.toLowerCase().includes(ind.toLowerCase())) {
+                    result.indicators.push(ind);
                 }
-            };
+            }
+            result.hasCommentIndicators = result.indicators.length > 0;
+
+            return result;
         });
+
+        // Log debug info
+        logger.info(`[VIEW-DEBUG] hasDialog=${debug.hasDialog}, hasArticle=${debug.hasArticle}, indicators=[${debug.indicators.join(',')}]`);
+        if (debug.dialogRect) {
+            logger.info(`[VIEW-DEBUG] Dialog: ${debug.dialogRect.width}x${debug.dialogRect.height} at (${Math.round(debug.dialogRect.x)},${Math.round(debug.dialogRect.y)})`);
+        }
+        if (debug.articleRect) {
+            logger.info(`[VIEW-DEBUG] Article: ${debug.articleRect.width}x${debug.articleRect.height} at (${Math.round(debug.articleRect.x)},${Math.round(debug.articleRect.y)})`);
+        }
+
+        // Determine view type based on debug info
+        if (debug.hasDialog && debug.dialogRect && debug.dialogRect.width > 300 && debug.dialogRect.height > 300) {
+            return {
+                type: 'MODAL',
+                scrollTarget: {
+                    x: debug.dialogRect.x + debug.dialogRect.width * 0.7,
+                    y: debug.dialogRect.y + debug.dialogRect.height * 0.5
+                },
+                debug
+            };
+        }
+
+        // If article exists, it's FEED_INLINE (even without specific indicators)
+        if (debug.hasArticle && debug.articleRect) {
+            return {
+                type: 'FEED_INLINE',
+                scrollTarget: {
+                    x: debug.articleRect.x + debug.articleRect.width * 0.75,
+                    y: debug.articleRect.y + debug.articleRect.height * 0.5
+                },
+                debug
+            };
+        }
+
+        // Fallback: use viewport center-right
+        logger.warn('[VIEW] Could not detect view type, using UNKNOWN fallback');
+        return {
+            type: 'UNKNOWN',
+            scrollTarget: {
+                x: 800, // ~70% of typical viewport
+                y: 400  // ~50% of typical viewport
+            },
+            debug
+        };
     }
 
     /**
