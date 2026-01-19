@@ -2004,7 +2004,8 @@ class InstagramService {
             }
 
             // STEP 2: Scroll in the correct container (using intelligent detection)
-            await page.evaluate((containerInfo) => {
+            // First, try to scroll via JavaScript
+            const jsScrolled = await page.evaluate((containerInfo) => {
                 // If modal is detected, find the scrollable element inside
                 if (containerInfo && containerInfo.useModal) {
                     const dialog = document.querySelector('div[role="dialog"]');
@@ -2017,13 +2018,13 @@ class InstagramService {
                                 div.scrollHeight > div.clientHeight + 20) {
                                 console.log('[SCROLL] Scrolling modal inner div');
                                 div.scrollTop = div.scrollHeight;
-                                return;
+                                return true;
                             }
                         }
                         // Fallback: scroll the dialog itself
                         console.log('[SCROLL] Scrolling modal dialog');
                         dialog.scrollTop = dialog.scrollHeight;
-                        return;
+                        return true;
                     }
                 }
 
@@ -2033,14 +2034,40 @@ class InstagramService {
                     if (container) {
                         console.log('[SCROLL] Scrolling by selector:', containerInfo.selector);
                         container.scrollTop = container.scrollHeight;
-                        return;
+                        return true;
                     }
                 }
 
-                // Last fallback: scroll window
-                console.log('[SCROLL] Fallback: scrolling window');
-                window.scrollBy(0, 600);
+                return false;
             }, scrollContainer);
+
+            // STEP 3: If JS scroll didn't work, use mouse.wheel in the dialog center
+            if (!jsScrolled) {
+                // Find dialog and use mouse wheel directly
+                const dialogBox = await page.evaluate(() => {
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    if (dialog) {
+                        const rect = dialog.getBoundingClientRect();
+                        return {
+                            x: rect.x + rect.width / 2,
+                            y: rect.y + rect.height / 2,
+                            found: true
+                        };
+                    }
+                    return { found: false };
+                });
+
+                if (dialogBox.found) {
+                    // Move mouse to center of dialog and scroll
+                    await page.mouse.move(dialogBox.x, dialogBox.y);
+                    await page.mouse.wheel(0, 500); // Scroll down 500px
+                    logger.info(`[SCROLL] 🖱️ Mouse wheel at (${Math.round(dialogBox.x)}, ${Math.round(dialogBox.y)})`);
+                } else {
+                    // Last fallback: scroll window
+                    await page.evaluate(() => window.scrollBy(0, 600));
+                    logger.info('[SCROLL] Window scroll fallback');
+                }
+            }
 
             // Wait for API to respond
             await randomDelay(SCROLL_DELAY, SCROLL_DELAY + 1500);
