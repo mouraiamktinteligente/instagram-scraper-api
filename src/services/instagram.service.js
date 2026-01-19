@@ -1967,18 +1967,30 @@ class InstagramService {
             await randomDelay(2500, 3500);
         }
 
-        // 📸 DEBUG SCREENSHOT: Capture state before scrolling
+        // 📸 DEBUG SCREENSHOT: Capture state before scrolling and upload to Supabase
         try {
-            const debugDir = '/tmp/instagram-debug';
-            const fs = require('fs');
-            if (!fs.existsSync(debugDir)) {
-                fs.mkdirSync(debugDir, { recursive: true });
-            }
-
             const timestamp = Date.now();
-            const screenshotPath = `${debugDir}/before-scroll-${timestamp}.png`;
-            await page.screenshot({ path: screenshotPath, fullPage: false });
-            logger.info(`[DEBUG] 📸 Screenshot saved: ${screenshotPath}`);
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
+
+            // Upload to Supabase Storage
+            const fileName = `debug/before-scroll-${timestamp}.png`;
+            const { data: uploadData, error: uploadError } = await supabase.storage
+                .from('screenshot')
+                .upload(fileName, screenshotBuffer, {
+                    contentType: 'image/png',
+                    upsert: true
+                });
+
+            if (uploadError) {
+                logger.warn(`[DEBUG] Upload error: ${uploadError.message}`);
+            } else {
+                // Get public URL
+                const { data: urlData } = supabase.storage
+                    .from('screenshot')
+                    .getPublicUrl(fileName);
+
+                logger.info(`[DEBUG] 📸 Screenshot uploaded: ${urlData.publicUrl}`);
+            }
 
             // Also capture DOM info about the dialog
             const dialogInfo = await page.evaluate(() => {
