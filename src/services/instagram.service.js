@@ -116,6 +116,8 @@ class InstagramService {
             }
 
             // Scroll to load more comments (with optional limit)
+            // ⭐ First, dismiss any blocking popups (Save Login Info, etc.)
+            await this.dismissBlockingPopups(page);
             await this.scrollForMoreComments(page, maxComments, comments);
 
             // NEW FALLBACK: Extract visible comments from DOM directly (after scroll)
@@ -707,26 +709,48 @@ class InstagramService {
             logger.info('[LOGIN] Step 8: Handling post-login popups...');
             await randomDelay(2000, 3000);
 
-            // Handle "Save Login Info" popup
+            // Handle "Save Login Info" popup - both English and Portuguese
             try {
-                const notNowButtons = await page.$$('button:has-text("Not Now")');
-                for (const btn of notNowButtons) {
+                // Try Portuguese first (Agora não), then English (Not Now)
+                const dismissSelectors = [
+                    'button:has-text("Agora não")',
+                    'button:has-text("Agora Não")',
+                    'div[role="button"]:has-text("Agora não")',
+                    'button:has-text("Not Now")',
+                    'button:has-text("Not now")',
+                ];
+
+                for (const selector of dismissSelectors) {
                     try {
-                        await btn.click();
-                        logger.info('[LOGIN] Clicked "Not Now" popup');
-                        await randomDelay(1000, 2000);
-                    } catch (e) { /* button might not be clickable */ }
+                        const btn = await page.$(selector);
+                        if (btn) {
+                            await btn.click();
+                            logger.info(`[LOGIN] Clicked dismiss button: ${selector}`);
+                            await randomDelay(1500, 2500);
+                            break;
+                        }
+                    } catch (e) { /* try next selector */ }
                 }
             } catch (e) { /* ignore */ }
 
             // Handle notifications popup
             try {
-                const turnOnBtn = await page.$('button:has-text("Turn On")');
-                const notNowBtn = await page.$('button:has-text("Not Now")');
-                if (notNowBtn) {
-                    await notNowBtn.click();
-                    logger.info('[LOGIN] Dismissed notifications popup');
-                    await randomDelay(1000, 2000);
+                const notificationDismiss = [
+                    'button:has-text("Agora não")',
+                    'button:has-text("Not Now")',
+                    'button:has-text("Turn On")',
+                ];
+
+                for (const selector of notificationDismiss) {
+                    try {
+                        const btn = await page.$(selector);
+                        if (btn) {
+                            await btn.click();
+                            logger.info('[LOGIN] Dismissed notifications popup');
+                            await randomDelay(1000, 2000);
+                            break;
+                        }
+                    } catch (e) { /* try next */ }
                 }
             } catch (e) { /* ignore */ }
 
@@ -3394,6 +3418,49 @@ class InstagramService {
             }
             return count;
         });
+    }
+
+    /**
+     * Dismiss any blocking popups (Save Login Info, Notifications, etc.)
+     * Must be called before scrolling to ensure popups don't block the comment modal
+     * @param {Page} page 
+     */
+    async dismissBlockingPopups(page) {
+        try {
+            // Check for "Save Login Info" popup
+            const popupSelectors = [
+                // Portuguese
+                'button:has-text("Agora não")',
+                'button:has-text("Agora Não")',
+                'div[role="button"]:has-text("Agora não")',
+                // English
+                'button:has-text("Not Now")',
+                'button:has-text("Not now")',
+                // Generic X close button
+                'div[role="dialog"] button[aria-label="Close"]',
+                'div[role="dialog"] svg[aria-label="Close"]',
+            ];
+
+            for (const selector of popupSelectors) {
+                try {
+                    const btn = await page.$(selector);
+                    if (btn) {
+                        const isVisible = await btn.isVisible();
+                        if (isVisible) {
+                            await btn.click();
+                            logger.info(`[POPUP] ✅ Dismissed blocking popup: ${selector}`);
+                            await randomDelay(1000, 2000);
+                            return true;
+                        }
+                    }
+                } catch (e) { /* try next selector */ }
+            }
+
+            return false;
+        } catch (error) {
+            logger.warn('[POPUP] Error dismissing popup:', error.message);
+            return false;
+        }
     }
 
     /**
