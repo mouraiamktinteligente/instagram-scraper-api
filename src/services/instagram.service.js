@@ -650,6 +650,37 @@ class InstagramService {
                     const finalUrl = page.url();
                     if (!finalUrl.includes('challenge') && !finalUrl.includes('checkpoint') && !finalUrl.includes('two_factor')) {
                         logger.info('[LOGIN] ✅ 2FA completed successfully!');
+
+                        // ⭐ IMPROVEMENT: Click "Trust this device" to avoid 2FA in future logins
+                        logger.info('[LOGIN] Step 7b: Looking for "Trust this device" option...');
+                        try {
+                            await randomDelay(1000, 2000);
+                            const trustSelectors = [
+                                // Checkbox for "Confiar neste dispositivo"
+                                'input[type="checkbox"]',
+                                'label:has-text("Confiar")',
+                                'label:has-text("Trust")',
+                                '[class*="checkbox"]',
+                            ];
+
+                            for (const selector of trustSelectors) {
+                                try {
+                                    const trustCheckbox = await page.$(selector);
+                                    if (trustCheckbox) {
+                                        const isChecked = await trustCheckbox.isChecked().catch(() => false);
+                                        if (!isChecked) {
+                                            await trustCheckbox.click();
+                                            logger.info(`[LOGIN] ✅ Checked "Trust this device": ${selector}`);
+                                            await randomDelay(500, 1000);
+                                        }
+                                        break;
+                                    }
+                                } catch (e) { /* try next */ }
+                            }
+                        } catch (e) {
+                            logger.debug('[LOGIN] No trust device option found (this is OK)');
+                        }
+
                         // Continue with login success flow
                     } else {
                         logger.error('[LOGIN] ❌ 2FA failed - still on challenge page');
@@ -811,6 +842,10 @@ class InstagramService {
             logger.info(`[2FA] TOTP Secret (first 8 chars): ${account.totpSecret.substring(0, 8)}...`);
             logger.info(`[2FA] Current URL: ${page.url()}`);
 
+            // ⭐ TIME SYNC CHECK: Log server time for debugging
+            const serverTime = new Date();
+            logger.info(`[2FA] ⏱️ Server time: ${serverTime.toISOString()} (UTC offset: ${serverTime.getTimezoneOffset()} min)`);
+
             // Wait for the 2FA page to fully load
             logger.info('[2FA] Waiting for 2FA page to stabilize...');
             await randomDelay(2000, 3000);
@@ -833,13 +868,15 @@ class InstagramService {
             }
 
             // Generate TOTP code with tolerance window
+            // Increase window on retries for better tolerance
+            const totpWindow = retryCount === 0 ? 1 : 2; // 1 period first try, 2 periods on retry
             const totpCode = speakeasy.totp({
                 secret: account.totpSecret,
                 encoding: 'base32',
-                window: 1  // Allow 1 period tolerance (±30 seconds)
+                window: totpWindow  // Allow tolerance (±30 or ±60 seconds)
             });
 
-            logger.info(`[2FA] ✅ Generated TOTP code: ${totpCode}`);
+            logger.info(`[2FA] ✅ Generated TOTP code: ${totpCode} (window: ${totpWindow})`);
             logger.info(`[2FA] Time in period: ${Math.floor(Date.now() / 1000) % 30}s (fresh code valid for ~${30 - (Math.floor(Date.now() / 1000) % 30)}s)`);
 
             // Log page content for debugging
