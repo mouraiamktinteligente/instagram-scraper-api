@@ -765,28 +765,63 @@ class InstagramService {
                     preview: pageText.substring(0, 500).replace(/\n/g, ' ')
                 });
 
-                // Try to get any visible error text
-                if (pageContent.includes('Sorry, your password was incorrect') || pageText.includes('senha incorreta')) {
-                    logger.error('[LOGIN] Password incorrect');
-                } else if (pageContent.includes('Please wait a few minutes') || pageText.includes('Aguarde alguns minutos')) {
-                    logger.error('[LOGIN] Rate limited - too many attempts');
-                } else if (pageText.includes('suspeita') || pageText.includes('suspicious')) {
-                    logger.error('[LOGIN] Suspicious activity detected');
-                } else if (pageText.includes('verificar') || pageText.includes('verify') || pageText.includes('codigo')) {
-                    logger.error('[LOGIN] Verification required');
-                } else if (pageText.includes('incorreta') || pageText.includes('incorrect') || pageText.includes('errada')) {
-                    logger.error('[LOGIN] Credentials incorrect');
+                // ⭐ FIX: Check if this is actually a 2FA page by content (even if URL is still /login/#)
+                const is2FAByContent =
+                    pageText.includes('código de 6 dígitos') ||
+                    pageText.includes('6-digit code') ||
+                    pageText.includes('Código de segurança') ||
+                    pageText.includes('Security code') ||
+                    pageText.includes('app de autenticação') ||
+                    pageText.includes('authentication app') ||
+                    pageText.includes('Duo Mobile') ||
+                    pageText.includes('Google Authenticator');
+
+                if (is2FAByContent) {
+                    logger.info('[LOGIN] ✅ 2FA page detected by content (URL still shows /login/#)');
+                    logger.info('[LOGIN] Redirecting to 2FA handler...');
+
+                    // Handle 2FA
+                    const is2FAChallenge = await this.handle2FAChallenge(page, account);
+
+                    if (is2FAChallenge) {
+                        const finalUrl = page.url();
+                        if (!finalUrl.includes('challenge') && !finalUrl.includes('checkpoint') && !finalUrl.includes('two_factor') && !finalUrl.includes('/accounts/login')) {
+                            logger.info('[LOGIN] ✅ 2FA completed successfully!');
+                            // Continue with login success flow below
+                        } else {
+                            logger.error('[LOGIN] ❌ 2FA failed - still on challenge page');
+                            await page.close();
+                            return false;
+                        }
+                    } else {
+                        logger.error('[LOGIN] ❌ 2FA handler failed');
+                        await page.close();
+                        return false;
+                    }
                 } else {
-                    logger.error('[LOGIN] Unknown error - still on login page');
-                    // Log more details for debugging
-                    logger.debug('[LOGIN] Full page text:', { text: pageText.substring(0, 2000) });
+                    // Try to get any visible error text
+                    if (pageContent.includes('Sorry, your password was incorrect') || pageText.includes('senha incorreta')) {
+                        logger.error('[LOGIN] Password incorrect');
+                    } else if (pageContent.includes('Please wait a few minutes') || pageText.includes('Aguarde alguns minutos')) {
+                        logger.error('[LOGIN] Rate limited - too many attempts');
+                    } else if (pageText.includes('suspeita') || pageText.includes('suspicious')) {
+                        logger.error('[LOGIN] Suspicious activity detected');
+                    } else if (pageText.includes('verificar') || pageText.includes('verify') || pageText.includes('codigo')) {
+                        logger.error('[LOGIN] Verification required');
+                    } else if (pageText.includes('incorreta') || pageText.includes('incorrect') || pageText.includes('errada')) {
+                        logger.error('[LOGIN] Credentials incorrect');
+                    } else {
+                        logger.error('[LOGIN] Unknown error - still on login page');
+                        // Log more details for debugging
+                        logger.debug('[LOGIN] Full page text:', { text: pageText.substring(0, 2000) });
+                    }
+
+                    // 📸 DEBUG SCREENSHOT: Capture state when login error
+                    await this.uploadDebugScreenshot(page, 'error-still-on-login-page');
+
+                    await page.close();
+                    return false;
                 }
-
-                // 📸 DEBUG SCREENSHOT: Capture state when login error
-                await this.uploadDebugScreenshot(page, 'error-still-on-login-page');
-
-                await page.close();
-                return false;
             }
 
             // Step 8: Handle post-login popups
@@ -1243,10 +1278,18 @@ class InstagramService {
             if (retryCount < MAX_2FA_RETRIES - 1) {
                 logger.info(`[2FA] 🔄 Retrying with fresh TOTP code (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
 
-                // Wait for new TOTP period
-                const waitForNewCode = 31000; // Wait 31 seconds to ensure new code
-                logger.info(`[2FA] ⏳ Waiting ${waitForNewCode / 1000}s for next TOTP period...`);
-                await new Promise(resolve => setTimeout(resolve, waitForNewCode));
+                // ⚠️ FIX: Don't wait 31 seconds - page may expire! 
+                // With window=2 we already have tolerance, just wait 5s for page stability
+                const waitForRetry = 5000;
+                logger.info(`[2FA] ⏳ Waiting ${waitForRetry / 1000}s before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitForRetry));
+
+                // Check if page expired during wait
+                const currentPageText = await page.evaluate(() => document.body?.innerText || '');
+                if (currentPageText.includes('não está disponível') || currentPageText.includes('not available') || currentPageText.includes('foi removida')) {
+                    logger.error('[2FA] ❌ Page expired - starting fresh login required');
+                    return false;
+                }
 
                 // Clear input and retry
                 try {
