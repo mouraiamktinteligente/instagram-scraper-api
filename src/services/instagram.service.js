@@ -1821,28 +1821,28 @@ class InstagramService {
         }
 
         // === LAYOUT DETERMINATION ===
+        // Priority: Dialog is the KEY differentiator between MODAL and FEED_INLINE
         let layoutType = 'UNKNOWN';
 
-        // MODAL: Has video + comment panel (typical post view)
-        if (detection.hasVideo && detection.hasCommentPanel) {
+        // MODAL: Has dialog detected (the most reliable indicator)
+        if (detection.hasDialog) {
             layoutType = 'MODAL_POST_VIEW';
+            logger.info('[LAYOUT-DETECT] Dialog found → MODAL_POST_VIEW');
         }
-        // MODAL: Has dialog detected
-        else if (detection.hasDialog) {
-            layoutType = 'MODAL_POST_VIEW';
-        }
-        // MODAL: Has large video with follow button
-        else if (detection.hasLargeVideo && detection.hasFollowButton) {
-            layoutType = 'MODAL_POST_VIEW';
-        }
-        // FEED_INLINE: Has article with comments
-        else if (detection.hasArticle && detection.visibleComments > 0) {
+        // FEED_INLINE: No dialog but has article (inline post in feed)
+        else if (detection.hasArticle && !detection.hasDialog) {
             layoutType = 'FEED_INLINE';
+            logger.info('[LAYOUT-DETECT] No dialog + article found → FEED_INLINE');
         }
-        // FALLBACK: If we have comment indicators, assume MODAL (most common)
-        else if (detection.hasCommentIndicators && detection.visibleComments > 0) {
+        // MODAL FALLBACK: Has video + comment panel but no dialog detected (may have missed it)
+        else if (detection.hasVideo && detection.hasCommentPanel) {
             layoutType = 'MODAL_POST_VIEW';
-            logger.info('[LAYOUT-DETECT] Using MODAL fallback based on comment indicators');
+            logger.info('[LAYOUT-DETECT] Video + comment panel → assuming MODAL_POST_VIEW');
+        }
+        // FEED_INLINE FALLBACK: Has comment indicators and visible comments
+        else if (detection.hasCommentIndicators && detection.visibleComments > 0) {
+            layoutType = 'FEED_INLINE';
+            logger.info('[LAYOUT-DETECT] Comment indicators visible → assuming FEED_INLINE');
         }
 
         logger.info(`[LAYOUT] 📱 Detected layout: ${layoutType}`);
@@ -2583,6 +2583,14 @@ class InstagramService {
                         await page.mouse.move(dialogBox.x, dialogBox.y);
                         await page.mouse.wheel(0, 500); // Scroll down 500px
                         logger.info(`[SCROLL] 🖱️ Mouse wheel at ${dialogBox.type} (${Math.round(dialogBox.x)}, ${Math.round(dialogBox.y)})`);
+                    } else if (this.currentLayoutType === 'FEED_INLINE') {
+                        // FEED_INLINE: Scroll on the right side of the viewport where comments are
+                        const viewport = page.viewportSize();
+                        const feedScrollX = viewport.width * 0.70; // 70% from left (right side panel)
+                        const feedScrollY = viewport.height * 0.50; // Middle of screen
+                        await page.mouse.move(feedScrollX, feedScrollY);
+                        await page.mouse.wheel(0, 400);
+                        logger.info(`[SCROLL] 🖱️ FEED_INLINE scroll at (${Math.round(feedScrollX)}, ${Math.round(feedScrollY)})`);
                     } else {
                         // Last fallback: scroll window
                         await page.evaluate(() => window.scrollBy(0, 600));
