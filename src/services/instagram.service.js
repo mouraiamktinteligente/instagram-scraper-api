@@ -671,7 +671,7 @@ class InstagramService {
             // Step 6: Wait for navigation or error - increase wait time
             await randomDelay(6000, 10000);
 
-            const currentUrl = page.url();
+            let currentUrl = page.url();
             logger.info(`[LOGIN] Step 6: Current URL after login attempt: ${currentUrl}`);
 
             // 📸 DEBUG SCREENSHOT: Capture state after login attempt
@@ -731,6 +731,9 @@ class InstagramService {
                         }
 
                         // Continue with login success flow
+                        // ⭐ FIX: Update currentUrl after successful 2FA to avoid "still on login page" error
+                        currentUrl = page.url();
+                        logger.info(`[LOGIN] Updated URL after 2FA: ${currentUrl}`);
                     } else {
                         logger.error('[LOGIN] ❌ 2FA failed - still on challenge page');
                         await page.close();
@@ -822,6 +825,50 @@ class InstagramService {
                     await page.close();
                     return false;
                 }
+            }
+
+            // ⭐ FIX: Handle post-login popups IMMEDIATELY after any navigation
+            // The "Save Login Info" modal appears and blocks further actions
+            logger.info('[LOGIN] 🔍 Checking for post-login popups...');
+
+            // First, check if "Save Login Info" modal is visible
+            try {
+                const pageText = await page.evaluate(() => document.body?.innerText || '');
+
+                // Check for "Save Login Info" popup indicators
+                const hasSaveInfoPopup =
+                    pageText.includes('Salvar suas informações de login') ||
+                    pageText.includes('Save your login info') ||
+                    pageText.includes('Salvar informações') ||
+                    pageText.includes('Save Login Info');
+
+                if (hasSaveInfoPopup) {
+                    logger.info('[LOGIN] ✅ Detected "Save Login Info" popup - this means login was successful!');
+
+                    // Try to click "Salvar informações" or "Not Now" / "Agora não"
+                    const saveInfoSelectors = [
+                        'button:has-text("Salvar informações")',
+                        'button:has-text("Salvar info")',
+                        'button:has-text("Save Info")',
+                        'button:has-text("Agora não")',
+                        'button:has-text("Not Now")',
+                        'div[role="button"]:has-text("Agora não")',
+                    ];
+
+                    for (const selector of saveInfoSelectors) {
+                        try {
+                            const btn = await page.$(selector);
+                            if (btn) {
+                                await btn.click();
+                                logger.info(`[LOGIN] ✅ Clicked popup button: ${selector}`);
+                                await page.waitForTimeout(2000);
+                                break;
+                            }
+                        } catch (e) { /* try next */ }
+                    }
+                }
+            } catch (e) {
+                logger.warn(`[LOGIN] Error checking popups: ${e.message}`);
             }
 
             // Step 8: Handle post-login popups
