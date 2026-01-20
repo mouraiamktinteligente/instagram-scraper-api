@@ -1707,33 +1707,93 @@ class InstagramService {
      */
     async detectLayoutType(page) {
         const detection = await page.evaluate(() => {
-            // === ROBUST SELECTORS ===
-            // Try multiple selectors for each element
+            // === ROBUST LAYOUT DETECTION ===
+            // Multiple indicators to confidently detect MODAL vs FEED_INLINE
 
-            // Dialog detection - try multiple patterns
+            // === INDICATOR 1: Dialog/Modal detection ===
             const dialogSelectors = [
                 'div[role="dialog"]',
+                'div[aria-modal="true"]',
                 '[class*="Modal"]',
-                '[class*="modal"]',
-                'div[style*="position: fixed"]',
-                'main > div > div > div' // Instagram's nested structure
+                '[class*="_aao_"]', // Instagram modal class pattern
             ];
             let dialog = null;
+            let dialogIndicators = 0;
+
             for (const sel of dialogSelectors) {
                 const el = document.querySelector(sel);
                 if (el && el.offsetWidth > 500 && el.offsetHeight > 400) {
                     dialog = el;
+                    dialogIndicators++;
                     break;
                 }
             }
 
-            // Article detection - try multiple patterns
-            const articleSelectors = [
-                'article',
-                'main article',
-                'main > div > div', // Common Instagram wrapper
-                '[role="main"]'
+            // Check for aria-modal attribute (strong indicator)
+            const ariaModal = document.querySelector('[aria-modal="true"]');
+            if (ariaModal) dialogIndicators++;
+
+            // === INDICATOR 2: Backdrop/Overlay (dark background) ===
+            let hasBackdrop = false;
+            const allDivs = document.querySelectorAll('div');
+            for (const div of allDivs) {
+                const style = window.getComputedStyle(div);
+                const bgColor = style.backgroundColor;
+                const opacity = parseFloat(style.opacity);
+
+                // Check for semi-transparent dark overlay
+                if (bgColor.includes('rgba') && bgColor.includes('0,') && div.offsetWidth === window.innerWidth) {
+                    hasBackdrop = true;
+                    dialogIndicators++;
+                    break;
+                }
+                // Check for high z-index overlay
+                if (parseInt(style.zIndex) > 100 && div.offsetWidth > window.innerWidth * 0.8) {
+                    hasBackdrop = true;
+                    dialogIndicators++;
+                    break;
+                }
+            }
+
+            // === INDICATOR 3: Close button (X) - modals have this ===
+            const closeButtonSelectors = [
+                'button[aria-label="Close"]',
+                'button[aria-label="Fechar"]',
+                'svg[aria-label="Close"]',
+                'svg[aria-label="Fechar"]',
+                'div[role="dialog"] button',
             ];
+            let hasCloseButton = false;
+            for (const sel of closeButtonSelectors) {
+                if (document.querySelector(sel)) {
+                    hasCloseButton = true;
+                    dialogIndicators++;
+                    break;
+                }
+            }
+
+            // === INDICATOR 4: Video position ===
+            // In MODAL: video is centered or takes left half
+            // In FEED_INLINE: video takes most of center, comments on right
+            const video = document.querySelector('video');
+            let videoPosition = 'unknown';
+            let hasLargeVideo = false;
+            if (video) {
+                const rect = video.getBoundingClientRect();
+                hasLargeVideo = rect.width > 300;
+                // Video in left 60% of screen = likely MODAL
+                // Video in center = could be either
+                if (rect.x < window.innerWidth * 0.1 && rect.width > window.innerWidth * 0.4) {
+                    videoPosition = 'left-large'; // MODAL pattern
+                } else if (rect.x + rect.width / 2 < window.innerWidth * 0.5) {
+                    videoPosition = 'left'; // Could be MODAL
+                } else {
+                    videoPosition = 'center'; // FEED_INLINE pattern
+                }
+            }
+
+            // === INDICATOR 5: Article detection ===
+            const articleSelectors = ['article', 'main article', '[role="main"]'];
             let article = null;
             for (const sel of articleSelectors) {
                 const el = document.querySelector(sel);
@@ -1742,10 +1802,6 @@ class InstagramService {
                     break;
                 }
             }
-
-            // Video detection
-            const video = document.querySelector('video');
-            const hasLargeVideo = video && video.offsetWidth > 300;
 
             // Comment panel detection - look for scrollable section with UL
             const sections = document.querySelectorAll('section');
@@ -1809,6 +1865,11 @@ class InstagramService {
                 visibleComments,
                 hasFollowButton,
                 hasCommentIndicators,
+                // New robust indicators
+                dialogIndicators, // Count of modal indicators (0 = likely FEED_INLINE, 2+ = likely MODAL)
+                hasBackdrop,
+                hasCloseButton,
+                videoPosition,
                 viewport: { width: window.innerWidth, height: window.innerHeight }
             };
         });
@@ -1816,33 +1877,35 @@ class InstagramService {
         // Log detection details
         logger.info(`[LAYOUT-DETECT] hasDialog=${detection.hasDialog}, hasArticle=${detection.hasArticle}, hasVideo=${detection.hasVideo}, hasCommentPanel=${detection.hasCommentPanel}`);
         logger.info(`[LAYOUT-DETECT] visibleComments=${detection.visibleComments}, hasFollowButton=${detection.hasFollowButton}`);
+        logger.info(`[LAYOUT-DETECT] 🎯 Modal indicators: ${detection.dialogIndicators} (backdrop=${detection.hasBackdrop}, closeBtn=${detection.hasCloseButton}, videoPos=${detection.videoPosition})`);
         if (detection.commentPanelRect) {
             logger.info(`[LAYOUT-DETECT] commentPanel: ${detection.commentPanelRect.width}x${detection.commentPanelRect.height}, scrollable=${detection.commentPanelRect.isScrollable}`);
         }
 
         // === LAYOUT DETERMINATION ===
-        // Priority: Dialog is the KEY differentiator between MODAL and FEED_INLINE
+        // Uses multiple indicators for robust detection
+        // dialogIndicators: 0 = likely FEED_INLINE, 1 = uncertain, 2+ = likely MODAL
         let layoutType = 'UNKNOWN';
 
-        // MODAL: Has dialog detected (the most reliable indicator)
-        if (detection.hasDialog) {
+        // HIGH CONFIDENCE MODAL: 2+ indicators OR has dialog
+        if (detection.dialogIndicators >= 2 || detection.hasDialog) {
             layoutType = 'MODAL_POST_VIEW';
-            logger.info('[LAYOUT-DETECT] Dialog found → MODAL_POST_VIEW');
+            logger.info(`[LAYOUT-DETECT] High confidence MODAL (${detection.dialogIndicators} indicators)`);
         }
-        // FEED_INLINE: No dialog but has article (inline post in feed)
-        else if (detection.hasArticle && !detection.hasDialog) {
+        // HIGH CONFIDENCE FEED: No dialog + has article + 0-1 indicators
+        else if (!detection.hasDialog && detection.hasArticle && detection.dialogIndicators <= 1) {
             layoutType = 'FEED_INLINE';
-            logger.info('[LAYOUT-DETECT] No dialog + article found → FEED_INLINE');
+            logger.info(`[LAYOUT-DETECT] High confidence FEED_INLINE (${detection.dialogIndicators} indicators, hasArticle=true)`);
         }
-        // MODAL FALLBACK: Has video + comment panel but no dialog detected (may have missed it)
+        // MODAL FALLBACK: Has video + comment panel but uncertain indicators
         else if (detection.hasVideo && detection.hasCommentPanel) {
             layoutType = 'MODAL_POST_VIEW';
-            logger.info('[LAYOUT-DETECT] Video + comment panel → assuming MODAL_POST_VIEW');
+            logger.info('[LAYOUT-DETECT] Fallback → MODAL_POST_VIEW (video + commentPanel)');
         }
         // FEED_INLINE FALLBACK: Has comment indicators and visible comments
-        else if (detection.hasCommentIndicators && detection.visibleComments > 0) {
+        else if (detection.hasCommentIndicators) {
             layoutType = 'FEED_INLINE';
-            logger.info('[LAYOUT-DETECT] Comment indicators visible → assuming FEED_INLINE');
+            logger.info('[LAYOUT-DETECT] Fallback → FEED_INLINE (comment indicators)');
         }
 
         logger.info(`[LAYOUT] 📱 Detected layout: ${layoutType}`);
