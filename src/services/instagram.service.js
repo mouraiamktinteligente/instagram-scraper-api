@@ -40,6 +40,45 @@ class InstagramService {
     }
 
     /**
+     * Upload a debug screenshot to Supabase Storage
+     * @param {Page} page - Playwright page
+     * @param {string} stepName - Name of the step (e.g., 'login-step1', '2fa-before-submit')
+     * @returns {Promise<string|null>} Public URL of the screenshot or null
+     */
+    async uploadDebugScreenshot(page, stepName) {
+        try {
+            const timestamp = Date.now();
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
+
+            // Generate filename with step and timestamp
+            const fileName = `debug/login/${stepName}-${timestamp}.png`;
+
+            const { data: uploadData, error: uploadError } = await supabase.storage
+                .from('screenshot')
+                .upload(fileName, screenshotBuffer, {
+                    contentType: 'image/png',
+                    upsert: true
+                });
+
+            if (uploadError) {
+                logger.warn(`[DEBUG] Screenshot upload error: ${uploadError.message}`);
+                return null;
+            }
+
+            // Get public URL
+            const { data: urlData } = supabase.storage
+                .from('screenshot')
+                .getPublicUrl(fileName);
+
+            logger.info(`[DEBUG] 📸 Screenshot [${stepName}]: ${urlData.publicUrl}`);
+            return urlData.publicUrl;
+        } catch (error) {
+            logger.warn(`[DEBUG] Screenshot capture failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
      * Main method to scrape comments from an Instagram post
      * @param {string} postUrl - Instagram post URL
      * @param {Object} proxy - Optional proxy configuration
@@ -372,6 +411,9 @@ class InstagramService {
             await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
             logger.info('[LOGIN] Step 1: Login page loaded');
 
+            // 📸 DEBUG SCREENSHOT: Capture state after page load
+            await this.uploadDebugScreenshot(page, 'step1-page-loaded');
+
             await randomDelay(3000, 5000);  // Longer delay to let React fully hydrate
 
             // Step 2: Handle cookie consent modal - REQUIRED before login form appears
@@ -524,6 +566,10 @@ class InstagramService {
             if (!usernameInput) {
                 logger.error('[LOGIN] Could not find any username input field!');
                 logger.error('[LOGIN] This may be due to Instagram blocking headless browsers');
+
+                // 📸 DEBUG SCREENSHOT: Capture state when username field not found
+                await this.uploadDebugScreenshot(page, 'error-no-username-field');
+
                 await page.close();
                 return false;
             }
@@ -627,6 +673,9 @@ class InstagramService {
 
             const currentUrl = page.url();
             logger.info(`[LOGIN] Step 6: Current URL after login attempt: ${currentUrl}`);
+
+            // 📸 DEBUG SCREENSHOT: Capture state after login attempt
+            await this.uploadDebugScreenshot(page, 'step6-after-login-click');
 
             // Step 7: Check for various states
             // Check for login error message
@@ -732,6 +781,10 @@ class InstagramService {
                     // Log more details for debugging
                     logger.debug('[LOGIN] Full page text:', { text: pageText.substring(0, 2000) });
                 }
+
+                // 📸 DEBUG SCREENSHOT: Capture state when login error
+                await this.uploadDebugScreenshot(page, 'error-still-on-login-page');
+
                 await page.close();
                 return false;
             }
@@ -854,6 +907,9 @@ class InstagramService {
             try {
                 await page.waitForLoadState('networkidle', { timeout: 5000 });
             } catch (e) { /* ignore timeout */ }
+
+            // 📸 DEBUG SCREENSHOT: Capture 2FA page state
+            await this.uploadDebugScreenshot(page, `2fa-attempt-${retryCount + 1}`);
 
             // ⭐ IMPROVEMENT 1: Generate TOTP with time tolerance
             // Wait until we're at least 5 seconds into a new period to avoid expiration during submission
@@ -1107,6 +1163,9 @@ class InstagramService {
             // ⭐ IMPROVEMENT 3: Check for error messages
             const urlAfterSubmit = page.url();
             logger.info(`[2FA] After submit - URL: ${urlAfterSubmit}`);
+
+            // 📸 DEBUG SCREENSHOT: Capture state after 2FA submission
+            await this.uploadDebugScreenshot(page, '2fa-after-submit');
 
             // Check for common error messages (Portuguese and English)
             const errorMessages = await page.evaluate(() => {
