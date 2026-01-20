@@ -1121,128 +1121,42 @@ class InstagramService {
                 await randomDelay(200, 300);
                 await page.keyboard.press('Enter');
             } else {
-                // Execute robustClick (multiple strategies)
-                logger.info('[2FA] 🖱️ Executing robust multi-strategy click...');
+                // ⭐ SIMPLIFIED SUBMIT: Only ONE click + wait for navigation
+                // Multiple strategies were causing repeated submissions = Instagram block!
+                logger.info('[2FA] 🖱️ Clicking submit button...');
 
-                // Strategy 1: Regular click with hover
                 try {
+                    // Single click with navigation wait
                     await submitBtn.hover();
-                    await randomDelay(200, 400);
-                    await submitBtn.click();
-                    logger.info('[2FA] Strategy 1 (hover+click): ✅');
-                } catch (e) {
-                    logger.warn(`[2FA] Strategy 1 failed: ${e.message}`);
-                }
+                    await randomDelay(100, 200);
 
-                await randomDelay(500, 800);
+                    // Click and wait for potential navigation
+                    await Promise.all([
+                        submitBtn.click(),
+                        page.waitForNavigation({ timeout: 10000, waitUntil: 'domcontentloaded' }).catch(() => {
+                            // Navigation may not happen if error
+                        })
+                    ]);
 
-                // ⭐ Helper function to safely check if still on 2FA page
-                const isStillOn2FAPage = async () => {
-                    try {
-                        const currentUrl = page.url();
-                        // Success indicators: navigated away from two_factor
-                        const successUrls = ['onetap', 'instagram.com/', 'accounts/access_tool'];
-                        for (const successUrl of successUrls) {
-                            if (currentUrl.includes(successUrl) && !currentUrl.includes('two_factor')) {
-                                logger.info(`[2FA] ✅ Navigation detected! URL: ${currentUrl}`);
-                                return false; // NOT on 2FA page = success!
-                            }
-                        }
-                        return currentUrl.includes('two_factor') || currentUrl.includes('challenge');
-                    } catch (e) {
-                        // If we can't get URL, page may be navigating = potential success
-                        logger.info('[2FA] Page may be navigating...');
-                        await randomDelay(1000, 1500);
-                        try {
-                            const newUrl = page.url();
-                            return newUrl.includes('two_factor') || newUrl.includes('challenge');
-                        } catch (e2) {
-                            return false; // Assume success if we can't get URL
-                        }
-                    }
-                };
-
-                // Check if still on 2FA page after Strategy 1
-                if (await isStillOn2FAPage()) {
-                    // Strategy 2: JavaScript click
-                    logger.info('[2FA] Still on 2FA page, trying Strategy 2 (JS click)...');
-                    try {
-                        await page.evaluate((sel) => {
-                            const btn = document.querySelector(sel) ||
-                                document.querySelector('button[type="submit"]') ||
-                                Array.from(document.querySelectorAll('button')).find(b =>
-                                    b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
-                                );
-                            if (btn) btn.click();
-                        }, submitSelector);
-                        logger.info('[2FA] Strategy 2 (JS click): ✅');
-                    } catch (e) {
-                        logger.debug(`[2FA] Strategy 2 error: ${e.message}`);
-                    }
-
-                    await randomDelay(500, 800);
-                }
-
-                // Check again
-                if (await isStillOn2FAPage()) {
-                    // Strategy 3: Dispatchevent click
-                    logger.info('[2FA] Trying Strategy 3 (dispatchEvent)...');
-                    try {
-                        await page.evaluate(() => {
-                            const btn = document.querySelector('button[type="submit"]') ||
-                                Array.from(document.querySelectorAll('button')).find(b =>
-                                    b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
-                                );
-                            if (btn) {
-                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            }
-                        });
-                        logger.info('[2FA] Strategy 3 (dispatchEvent): ✅');
-                    } catch (e) {
-                        logger.debug(`[2FA] Strategy 3 error: ${e.message}`);
-                    }
-
-                    await randomDelay(500, 800);
-                }
-
-                // Check again
-                if (await isStillOn2FAPage()) {
-                    // Strategy 4: Form submit
-                    logger.info('[2FA] Trying Strategy 4 (form.submit)...');
-                    try {
-                        await page.evaluate(() => {
-                            const forms = document.querySelectorAll('form');
-                            forms.forEach(f => {
-                                try { f.submit(); } catch (e) { }
-                            });
-                        });
-                    } catch (e) {
-                        logger.debug(`[2FA] Strategy 4 error: ${e.message}`);
-                    }
-
-                    await randomDelay(500, 800);
-                }
-
-                // Strategy 5: Enter key as final fallback
-                if (await isStillOn2FAPage()) {
-                    logger.info('[2FA] Trying Strategy 5 (Enter key)...');
+                    logger.info('[2FA] ✅ Submit button clicked');
+                } catch (clickError) {
+                    logger.warn(`[2FA] Click error: ${clickError.message}, trying Enter key...`);
                     try {
                         await codeInput.focus();
                         await page.keyboard.press('Enter');
-                    } catch (e) {
-                        logger.debug(`[2FA] Strategy 5 error: ${e.message}`);
-                    }
+                        logger.info('[2FA] ✅ Fallback: Enter key pressed');
+                    } catch (e) { }
                 }
             }
 
-            // Wait for navigation/response
-            logger.info('[2FA] ⏳ Waiting for response after submit...');
-            await randomDelay(3000, 4000);
+            // Wait for Instagram to fully process the code
+            logger.info('[2FA] ⏳ Waiting for Instagram to process code...');
+            await randomDelay(5000, 6000);
 
-            // Wait for network idle
+            // Wait for network to settle
             try {
                 await page.waitForLoadState('networkidle', { timeout: 8000 });
-            } catch (e) { /* ignore */ }
+            } catch (e) { /* ignore timeout */ }
 
             // ⭐ IMPROVEMENT 3: Check for error messages
             const urlAfterSubmit = page.url();
