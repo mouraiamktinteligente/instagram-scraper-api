@@ -788,11 +788,15 @@ class InstagramService {
 
     /**
      * Handle 2FA challenge by generating TOTP code
+     * Improvements: time tolerance, robustClick, error detection, retry with new code
      * @param {Page} page
      * @param {Object} account
+     * @param {number} retryCount - Current retry attempt (max 3)
      * @returns {Promise<boolean>} true if 2FA was handled, false if not
      */
-    async handle2FAChallenge(page, account) {
+    async handle2FAChallenge(page, account, retryCount = 0) {
+        const MAX_2FA_RETRIES = 3;
+
         // Check if account has TOTP secret
         if (!account.totpSecret) {
             logger.warn('[2FA] Account does not have TOTP secret configured');
@@ -800,30 +804,47 @@ class InstagramService {
         }
 
         try {
-            logger.info('[2FA] ========== 2FA DEBUG START ==========');
+            logger.info('[2FA] ========================================');
+            logger.info(`[2FA] 🔐 2FA ATTEMPT ${retryCount + 1}/${MAX_2FA_RETRIES}`);
+            logger.info('[2FA] ========================================');
             logger.info(`[2FA] Account: ${account.username}`);
             logger.info(`[2FA] TOTP Secret (first 8 chars): ${account.totpSecret.substring(0, 8)}...`);
-            logger.info(`[2FA] TOTP Secret length: ${account.totpSecret.length}`);
             logger.info(`[2FA] Current URL: ${page.url()}`);
 
-            // Generate TOTP code
+            // Wait for the 2FA page to fully load
+            logger.info('[2FA] Waiting for 2FA page to stabilize...');
+            await randomDelay(2000, 3000);
+
+            // Wait for network idle
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 5000 });
+            } catch (e) { /* ignore timeout */ }
+
+            // ⭐ IMPROVEMENT 1: Generate TOTP with time tolerance
+            // Wait until we're at least 5 seconds into a new period to avoid expiration during submission
+            const currentTime = Math.floor(Date.now() / 1000);
+            const timeInPeriod = currentTime % 30;
+
+            if (timeInPeriod > 25) {
+                // Too close to next period, wait for new code
+                const waitTime = (30 - timeInPeriod + 2) * 1000;
+                logger.info(`[2FA] ⏳ Waiting ${waitTime}ms for fresh TOTP code (current position: ${timeInPeriod}s)`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+
+            // Generate TOTP code with tolerance window
             const totpCode = speakeasy.totp({
                 secret: account.totpSecret,
-                encoding: 'base32'
+                encoding: 'base32',
+                window: 1  // Allow 1 period tolerance (±30 seconds)
             });
 
-            // Log FULL code for debugging (remove in production)
-            logger.info(`[2FA] Generated TOTP code: ${totpCode}`);
-            logger.info(`[2FA] Code length: ${totpCode.length}`);
-            logger.info(`[2FA] Code type: ${typeof totpCode}`);
-
-            // Wait for the 2FA input field
-            logger.info('[2FA] Waiting for 2FA page to load...');
-            await randomDelay(2000, 3000);
+            logger.info(`[2FA] ✅ Generated TOTP code: ${totpCode}`);
+            logger.info(`[2FA] Time in period: ${Math.floor(Date.now() / 1000) % 30}s (fresh code valid for ~${30 - (Math.floor(Date.now() / 1000) % 30)}s)`);
 
             // Log page content for debugging
             const pageText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-            logger.info(`[2FA] Page content preview: ${pageText.replace(/\n/g, ' ')}`);
+            logger.info(`[2FA] Page content: ${pageText.replace(/\n/g, ' ').substring(0, 200)}...`);
 
             // Look for 2FA code input field (various selectors)
             const codeInputSelectors = [
@@ -832,6 +853,7 @@ class InstagramService {
                 'input[aria-label*="Security code"]',
                 'input[aria-label*="código"]',
                 'input[aria-label*="Código"]',
+                'input[aria-label*="Código de segurança"]',
                 'input[placeholder*="code"]',
                 'input[placeholder*="código"]',
                 'input[type="text"][maxlength="6"]',
@@ -842,169 +864,261 @@ class InstagramService {
             let codeInput = null;
             for (const selector of codeInputSelectors) {
                 try {
-                    codeInput = await page.waitForSelector(selector, { timeout: 3000 });
+                    codeInput = await page.waitForSelector(selector, { timeout: 2000 });
                     if (codeInput) {
                         const isVisible = await codeInput.isVisible().catch(() => false);
-                        logger.info(`[2FA] Found input with selector: ${selector} (visible: ${isVisible})`);
-                        if (isVisible) break;
-                        codeInput = null; // Reset if not visible
+                        if (isVisible) {
+                            logger.info(`[2FA] ✅ Found input: ${selector}`);
+                            break;
+                        }
+                        codeInput = null;
                     }
-                } catch (e) {
-                    logger.debug(`[2FA] Selector ${selector} not found`);
-                }
+                } catch (e) { /* try next */ }
             }
 
             if (!codeInput) {
                 logger.error('[2FA] ❌ Could not find 2FA code input field');
-                logger.error(`[2FA] Available inputs: ${await page.$$eval('input', inputs => inputs.map(i => `${i.name || i.type || 'unknown'}[${i.placeholder || ''}]`).join(', '))}`);
+                const inputs = await page.$$eval('input', inputs =>
+                    inputs.map(i => `${i.name || i.type || 'unknown'}[${i.placeholder || ''}]`)
+                );
+                logger.error(`[2FA] Available inputs: ${inputs.join(', ')}`);
                 return false;
             }
 
-            // Clear and type the code
-            logger.info('[2FA] Filling code input...');
+            // Clear and type the code with human-like delay
+            logger.info('[2FA] 📝 Filling code input...');
+            await codeInput.click();
+            await randomDelay(200, 400);
             await codeInput.fill('');
-            await codeInput.type(totpCode, { delay: 150 });
+            await randomDelay(100, 200);
+
+            // Type code one digit at a time for more human-like behavior
+            for (const digit of totpCode) {
+                await codeInput.type(digit, { delay: 100 + Math.random() * 100 });
+            }
 
             // Verify what was typed
             const typedValue = await codeInput.inputValue();
-            logger.info(`[2FA] Value in input field: ${typedValue}`);
-            logger.info(`[2FA] Match: ${typedValue === totpCode}`);
+            logger.info(`[2FA] Typed value: ${typedValue} (match: ${typedValue === totpCode})`);
 
-            // Wait before submitting
-            await randomDelay(1000, 1500);
-
-            // Take screenshot of page state (log URL and title)
-            const urlBeforeSubmit = page.url();
-            const titleBeforeSubmit = await page.title();
-            logger.info(`[2FA] Before submit - URL: ${urlBeforeSubmit}`);
-            logger.info(`[2FA] Before submit - Title: ${titleBeforeSubmit}`);
-
-            // Look for submit/confirm button
-            const submitSelectors = [
-                'button[type="submit"]',
-                'button:has-text("Confirm")',
-                'button:has-text("Confirmar")',
-                'button:has-text("Verificar")',
-                'button:has-text("Verify")',
-                'button:has-text("Submit")',
-                'button:has-text("Enviar")',
-                'div[role="button"]:has-text("Confirm")',
-                'div[role="button"]:has-text("Confirmar")',
-            ];
-
-            let submitted = false;
-            let clickedSelector = '';
-            for (const selector of submitSelectors) {
-                try {
-                    const submitBtn = await page.$(selector);
-                    if (submitBtn) {
-                        const btnText = await submitBtn.textContent().catch(() => '');
-                        const isVisible = await submitBtn.isVisible().catch(() => false);
-                        logger.info(`[2FA] Found button: ${selector} (text: "${btnText}", visible: ${isVisible})`);
-
-                        if (isVisible) {
-                            // Try human-like click with hover first
-                            logger.info('[2FA] Attempting human-like click...');
-
-                            // Hover over button first
-                            await submitBtn.hover();
-                            await randomDelay(300, 500);
-
-                            // Click with force option
-                            await submitBtn.click({ force: true });
-                            clickedSelector = selector;
-                            submitted = true;
-                            logger.info(`[2FA] ✅ Clicked submit button with force: ${selector}`);
-
-                            // Wait a bit and check if page changed
-                            await randomDelay(1500, 2000);
-
-                            // If still on same page, try JavaScript click
-                            const urlCheck1 = page.url();
-                            if (urlCheck1.includes('two_factor')) {
-                                logger.info('[2FA] Still on 2FA page, trying JavaScript click...');
-                                await page.evaluate((sel) => {
-                                    const btn = document.querySelector(sel) ||
-                                        document.querySelector('button[type="submit"]') ||
-                                        Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Confirm') || b.textContent.includes('Confirmar'));
-                                    if (btn) {
-                                        btn.click();
-                                        // Try to submit the form too
-                                        const form = btn.closest('form');
-                                        if (form) form.submit();
-                                    }
-                                }, 'button[type="submit"]');
-
-                                await randomDelay(1500, 2000);
-
-                                // Try form submit directly
-                                const urlCheck2 = page.url();
-                                if (urlCheck2.includes('two_factor')) {
-                                    logger.info('[2FA] Trying direct form submit...');
-                                    await page.evaluate(() => {
-                                        const forms = document.querySelectorAll('form');
-                                        forms.forEach(f => {
-                                            try { f.submit(); } catch (e) { }
-                                        });
-                                    });
-                                }
-                            }
-
-                            break;
-                        }
-                    }
-                } catch (e) {
-                    logger.debug(`[2FA] Button selector ${selector} failed: ${e.message}`);
-                }
+            if (typedValue !== totpCode) {
+                logger.error('[2FA] ❌ Code mismatch! Retrying...');
+                await codeInput.fill('');
+                await codeInput.type(totpCode, { delay: 150 });
             }
 
-            if (!submitted) {
+            // Wait before submitting
+            await randomDelay(800, 1200);
+
+            // ⭐ IMPROVEMENT 2: Use robustClick for the submit button
+            const submitSelectors = [
+                'button[type="submit"]',
+                'button:has-text("Confirmar")',
+                'button:has-text("Confirm")',
+                'button:has-text("Verificar")',
+                'button:has-text("Verify")',
+                'div[role="button"]:has-text("Confirmar")',
+                'div[role="button"]:has-text("Confirm")',
+            ];
+
+            let submitBtn = null;
+            let submitSelector = '';
+            for (const selector of submitSelectors) {
+                try {
+                    submitBtn = await page.$(selector);
+                    if (submitBtn) {
+                        const isVisible = await submitBtn.isVisible().catch(() => false);
+                        if (isVisible) {
+                            submitSelector = selector;
+                            logger.info(`[2FA] ✅ Found submit button: ${selector}`);
+                            break;
+                        }
+                        submitBtn = null;
+                    }
+                } catch (e) { /* try next */ }
+            }
+
+            if (!submitBtn) {
                 logger.warn('[2FA] No submit button found, trying Enter key...');
-                // Focus on input first
                 await codeInput.focus();
                 await randomDelay(200, 300);
                 await page.keyboard.press('Enter');
-                clickedSelector = 'Enter key';
-                logger.info('[2FA] Pressed Enter to submit');
+            } else {
+                // Execute robustClick (multiple strategies)
+                logger.info('[2FA] 🖱️ Executing robust multi-strategy click...');
+
+                // Strategy 1: Regular click with hover
+                try {
+                    await submitBtn.hover();
+                    await randomDelay(200, 400);
+                    await submitBtn.click();
+                    logger.info('[2FA] Strategy 1 (hover+click): ✅');
+                } catch (e) {
+                    logger.warn(`[2FA] Strategy 1 failed: ${e.message}`);
+                }
+
+                await randomDelay(500, 800);
+
+                // Check if still on 2FA page
+                if (page.url().includes('two_factor')) {
+                    // Strategy 2: JavaScript click
+                    logger.info('[2FA] Still on 2FA page, trying Strategy 2 (JS click)...');
+                    await page.evaluate((sel) => {
+                        const btn = document.querySelector(sel) ||
+                            document.querySelector('button[type="submit"]') ||
+                            Array.from(document.querySelectorAll('button')).find(b =>
+                                b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
+                            );
+                        if (btn) btn.click();
+                    }, submitSelector);
+                    logger.info('[2FA] Strategy 2 (JS click): ✅');
+
+                    await randomDelay(500, 800);
+                }
+
+                // Check again
+                if (page.url().includes('two_factor')) {
+                    // Strategy 3: Dispatchevent click
+                    logger.info('[2FA] Trying Strategy 3 (dispatchEvent)...');
+                    await page.evaluate(() => {
+                        const btn = document.querySelector('button[type="submit"]') ||
+                            Array.from(document.querySelectorAll('button')).find(b =>
+                                b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
+                            );
+                        if (btn) {
+                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        }
+                    });
+                    logger.info('[2FA] Strategy 3 (dispatchEvent): ✅');
+
+                    await randomDelay(500, 800);
+                }
+
+                // Check again
+                if (page.url().includes('two_factor')) {
+                    // Strategy 4: Form submit
+                    logger.info('[2FA] Trying Strategy 4 (form.submit)...');
+                    await page.evaluate(() => {
+                        const forms = document.querySelectorAll('form');
+                        forms.forEach(f => {
+                            try { f.submit(); } catch (e) { }
+                        });
+                    });
+
+                    await randomDelay(500, 800);
+                }
+
+                // Strategy 5: Enter key as final fallback
+                if (page.url().includes('two_factor')) {
+                    logger.info('[2FA] Trying Strategy 5 (Enter key)...');
+                    await codeInput.focus();
+                    await page.keyboard.press('Enter');
+                }
             }
 
             // Wait for navigation/response
-            logger.info('[2FA] Waiting for response after submit...');
+            logger.info('[2FA] ⏳ Waiting for response after submit...');
             await randomDelay(3000, 4000);
 
-            // Try to wait for navigation
+            // Wait for network idle
             try {
                 await page.waitForLoadState('networkidle', { timeout: 8000 });
-                logger.info('[2FA] Network idle reached');
-            } catch (e) {
-                logger.warn('[2FA] Network idle timeout - continuing anyway');
-            }
+            } catch (e) { /* ignore */ }
 
-            // Check result
+            // ⭐ IMPROVEMENT 3: Check for error messages
             const urlAfterSubmit = page.url();
-            const titleAfterSubmit = await page.title();
             logger.info(`[2FA] After submit - URL: ${urlAfterSubmit}`);
-            logger.info(`[2FA] After submit - Title: ${titleAfterSubmit}`);
 
-            // Check for error messages on page
-            const errorTexts = await page.$$eval('[role="alert"], .error, [class*="error"], [class*="Error"]',
-                elements => elements.map(e => e.textContent?.trim()).filter(Boolean)
-            ).catch(() => []);
+            // Check for common error messages (Portuguese and English)
+            const errorMessages = await page.evaluate(() => {
+                const errorSelectors = [
+                    '[role="alert"]',
+                    '.error',
+                    '[class*="error"]',
+                    '[class*="Error"]',
+                    'p[data-testid*="error"]',
+                    'span[data-testid*="error"]',
+                ];
 
-            if (errorTexts.length > 0) {
-                logger.error(`[2FA] ❌ Error messages found: ${errorTexts.join(' | ')}`);
+                const errors = [];
+                for (const sel of errorSelectors) {
+                    const elements = document.querySelectorAll(sel);
+                    elements.forEach(el => {
+                        const text = el.textContent?.trim();
+                        if (text && text.length > 5) errors.push(text);
+                    });
+                }
+
+                // Also check page text for common error phrases
+                const pageText = document.body?.innerText || '';
+                const errorPhrases = [
+                    'código incorreto',
+                    'incorrect code',
+                    'código inválido',
+                    'invalid code',
+                    'tente novamente',
+                    'try again',
+                    'expirou',
+                    'expired',
+                ];
+
+                for (const phrase of errorPhrases) {
+                    if (pageText.toLowerCase().includes(phrase.toLowerCase())) {
+                        errors.push(`Found phrase: "${phrase}"`);
+                    }
+                }
+
+                return errors;
+            });
+
+            if (errorMessages.length > 0) {
+                logger.error(`[2FA] ❌ Error messages detected: ${errorMessages.join(' | ')}`);
             }
 
-            // Log final page content
-            const finalPageText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-            logger.info(`[2FA] Final page content: ${finalPageText.replace(/\n/g, ' ')}`);
+            // Check if we're still on 2FA page
+            if (urlAfterSubmit.includes('two_factor') || urlAfterSubmit.includes('challenge')) {
+                logger.warn('[2FA] ⚠️ Still on 2FA/challenge page after submit');
 
-            logger.info('[2FA] ========== 2FA DEBUG END ==========');
+                // ⭐ IMPROVEMENT 4: Retry with new code
+                if (retryCount < MAX_2FA_RETRIES - 1) {
+                    logger.info(`[2FA] 🔄 Retrying with fresh TOTP code (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
+
+                    // Wait for new TOTP period
+                    const waitForNewCode = 31000; // Wait 31 seconds to ensure new code
+                    logger.info(`[2FA] ⏳ Waiting ${waitForNewCode / 1000}s for next TOTP period...`);
+                    await new Promise(resolve => setTimeout(resolve, waitForNewCode));
+
+                    // Clear input and retry
+                    try {
+                        const retryInput = await page.$('input[name="verificationCode"]') ||
+                            await page.$('input[type="text"][maxlength="6"]');
+                        if (retryInput) {
+                            await retryInput.fill('');
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    return await this.handle2FAChallenge(page, account, retryCount + 1);
+                }
+
+                logger.error(`[2FA] ❌ All ${MAX_2FA_RETRIES} attempts failed`);
+                return false;
+            }
+
+            // Success! Navigated away from 2FA page
+            logger.info('[2FA] ✅ Successfully passed 2FA challenge!');
+            logger.info(`[2FA] New URL: ${urlAfterSubmit}`);
             return true;
 
         } catch (error) {
             logger.error('[2FA] ❌ Exception in 2FA handler:', error.message);
-            logger.error('[2FA] Stack:', error.stack);
+
+            // Retry on exception
+            if (retryCount < MAX_2FA_RETRIES - 1) {
+                logger.info(`[2FA] 🔄 Retrying after exception (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
+                await randomDelay(5000, 8000);
+                return await this.handle2FAChallenge(page, account, retryCount + 1);
+            }
+
             return false;
         }
     }
