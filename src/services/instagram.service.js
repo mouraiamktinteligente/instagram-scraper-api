@@ -958,49 +958,66 @@ class InstagramService {
                 await new Promise(resolve => setTimeout(resolve, waitTime));
             }
 
-            // Generate TOTP code with tolerance window
-            // Increase window on retries for better tolerance
-            const totpWindow = retryCount === 0 ? 1 : 2; // 1 period first try, 2 periods on retry
+            // Generate TOTP code using 2fa.live API (more reliable than local speakeasy)
+            // The 2fa.live service generates codes that work correctly with Instagram
 
-            // ⭐ DEBUG: Sanitize and validate TOTP secret
-            // Remove spaces and convert to uppercase (standard base32 format)
+            // ⭐ Sanitize TOTP secret: remove spaces and convert to uppercase
             const sanitizedSecret = account.totpSecret.replace(/\s+/g, '').toUpperCase();
 
             // Log secret validation info
             logger.info(`[2FA] 🔑 Secret length: ${sanitizedSecret.length} chars`);
             logger.info(`[2FA] 🔑 Secret preview: ${sanitizedSecret.substring(0, 4)}...${sanitizedSecret.substring(sanitizedSecret.length - 4)}`);
 
-            // Get current timestamp for TOTP calculation
-            const currentTimestamp = Math.floor(Date.now() / 1000);
-            const totpStep = Math.floor(currentTimestamp / 30);
+            let totpCode = null;
 
-            logger.info(`[2FA] ⏰ Current UNIX timestamp: ${currentTimestamp}`);
-            logger.info(`[2FA] ⏰ TOTP time step: ${totpStep}`);
+            // ⭐ PRIMARY: Use 2fa.live API for TOTP generation
+            try {
+                logger.info(`[2FA] 🌐 Fetching TOTP from 2fa.live API...`);
 
-            // Generate TOTP code with sanitized secret
-            const totpCode = speakeasy.totp({
-                secret: sanitizedSecret,
-                encoding: 'base32',
-                window: totpWindow,  // Allow tolerance (±30 or ±60 seconds)
-                step: 30
-            });
+                const https = require('https');
+                const fetch2faCode = () => {
+                    return new Promise((resolve, reject) => {
+                        const req = https.get(`https://2fa.live/tok/${sanitizedSecret}`, { timeout: 5000 }, (res) => {
+                            let data = '';
+                            res.on('data', chunk => data += chunk);
+                            res.on('end', () => {
+                                try {
+                                    const json = JSON.parse(data);
+                                    resolve(json.token);
+                                } catch (e) {
+                                    reject(new Error('Invalid JSON response'));
+                                }
+                            });
+                        });
+                        req.on('error', reject);
+                        req.on('timeout', () => {
+                            req.destroy();
+                            reject(new Error('Request timeout'));
+                        });
+                    });
+                };
 
-            // Also generate previous and next codes for debugging
-            const prevCode = speakeasy.totp({
-                secret: sanitizedSecret,
-                encoding: 'base32',
-                time: (currentTimestamp - 30) * 1000 // Previous period
-            });
+                totpCode = await fetch2faCode();
+                logger.info(`[2FA] ✅ 2fa.live returned code: ${totpCode}`);
 
-            const nextCode = speakeasy.totp({
-                secret: sanitizedSecret,
-                encoding: 'base32',
-                time: (currentTimestamp + 30) * 1000 // Next period
-            });
+            } catch (apiError) {
+                logger.warn(`[2FA] ⚠️ 2fa.live API failed: ${apiError.message}`);
+                logger.info(`[2FA] 🔄 Falling back to local speakeasy generation...`);
 
-            logger.info(`[2FA] ✅ Generated TOTP code: ${totpCode} (window: ${totpWindow})`);
-            logger.info(`[2FA] 🔍 Debug - Prev/Current/Next: ${prevCode} / ${totpCode} / ${nextCode}`);
-            logger.info(`[2FA] Time in period: ${Math.floor(Date.now() / 1000) % 30}s (fresh code valid for ~${30 - (Math.floor(Date.now() / 1000) % 30)}s)`);
+                // FALLBACK: Use local speakeasy if API fails
+                const totpWindow = retryCount === 0 ? 1 : 2;
+                totpCode = speakeasy.totp({
+                    secret: sanitizedSecret,
+                    encoding: 'base32',
+                    window: totpWindow,
+                    step: 30
+                });
+                logger.info(`[2FA] ✅ Speakeasy fallback code: ${totpCode}`);
+            }
+
+            // Log timing info
+            const currentTimeInPeriod = Math.floor(Date.now() / 1000) % 30;
+            logger.info(`[2FA] ⏰ Time in period: ${currentTimeInPeriod}s (code valid for ~${30 - currentTimeInPeriod}s)`);
 
             // Log page content for debugging
             const pageText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
