@@ -961,13 +961,45 @@ class InstagramService {
             // Generate TOTP code with tolerance window
             // Increase window on retries for better tolerance
             const totpWindow = retryCount === 0 ? 1 : 2; // 1 period first try, 2 periods on retry
+
+            // ⭐ DEBUG: Sanitize and validate TOTP secret
+            // Remove spaces and convert to uppercase (standard base32 format)
+            const sanitizedSecret = account.totpSecret.replace(/\s+/g, '').toUpperCase();
+
+            // Log secret validation info
+            logger.info(`[2FA] 🔑 Secret length: ${sanitizedSecret.length} chars`);
+            logger.info(`[2FA] 🔑 Secret preview: ${sanitizedSecret.substring(0, 4)}...${sanitizedSecret.substring(sanitizedSecret.length - 4)}`);
+
+            // Get current timestamp for TOTP calculation
+            const currentTimestamp = Math.floor(Date.now() / 1000);
+            const totpStep = Math.floor(currentTimestamp / 30);
+
+            logger.info(`[2FA] ⏰ Current UNIX timestamp: ${currentTimestamp}`);
+            logger.info(`[2FA] ⏰ TOTP time step: ${totpStep}`);
+
+            // Generate TOTP code with sanitized secret
             const totpCode = speakeasy.totp({
-                secret: account.totpSecret,
+                secret: sanitizedSecret,
                 encoding: 'base32',
-                window: totpWindow  // Allow tolerance (±30 or ±60 seconds)
+                window: totpWindow,  // Allow tolerance (±30 or ±60 seconds)
+                step: 30
+            });
+
+            // Also generate previous and next codes for debugging
+            const prevCode = speakeasy.totp({
+                secret: sanitizedSecret,
+                encoding: 'base32',
+                time: (currentTimestamp - 30) * 1000 // Previous period
+            });
+
+            const nextCode = speakeasy.totp({
+                secret: sanitizedSecret,
+                encoding: 'base32',
+                time: (currentTimestamp + 30) * 1000 // Next period
             });
 
             logger.info(`[2FA] ✅ Generated TOTP code: ${totpCode} (window: ${totpWindow})`);
+            logger.info(`[2FA] 🔍 Debug - Prev/Current/Next: ${prevCode} / ${totpCode} / ${nextCode}`);
             logger.info(`[2FA] Time in period: ${Math.floor(Date.now() / 1000) % 30}s (fresh code valid for ~${30 - (Math.floor(Date.now() / 1000) % 30)}s)`);
 
             // Log page content for debugging
@@ -1286,8 +1318,14 @@ class InstagramService {
 
                 // Check if page expired during wait
                 const currentPageText = await page.evaluate(() => document.body?.innerText || '');
+                logger.info(`[2FA] 📄 Page text before retry (first 200 chars): ${currentPageText.substring(0, 200).replace(/\n/g, ' ')}`);
+
                 if (currentPageText.includes('não está disponível') || currentPageText.includes('not available') || currentPageText.includes('foi removida')) {
-                    logger.error('[2FA] ❌ Page expired - starting fresh login required');
+                    logger.error('[2FA] ❌ Page expired or invalid - Instagram rejected the code');
+
+                    // 📸 DEBUG SCREENSHOT: Capture expired page
+                    await this.uploadDebugScreenshot(page, '2fa-page-expired');
+
                     return false;
                 }
 
