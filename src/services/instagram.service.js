@@ -959,60 +959,102 @@ class InstagramService {
 
                 await randomDelay(500, 800);
 
-                // Check if still on 2FA page
-                if (page.url().includes('two_factor')) {
+                // ⭐ Helper function to safely check if still on 2FA page
+                const isStillOn2FAPage = async () => {
+                    try {
+                        const currentUrl = page.url();
+                        // Success indicators: navigated away from two_factor
+                        const successUrls = ['onetap', 'instagram.com/', 'accounts/access_tool'];
+                        for (const successUrl of successUrls) {
+                            if (currentUrl.includes(successUrl) && !currentUrl.includes('two_factor')) {
+                                logger.info(`[2FA] ✅ Navigation detected! URL: ${currentUrl}`);
+                                return false; // NOT on 2FA page = success!
+                            }
+                        }
+                        return currentUrl.includes('two_factor') || currentUrl.includes('challenge');
+                    } catch (e) {
+                        // If we can't get URL, page may be navigating = potential success
+                        logger.info('[2FA] Page may be navigating...');
+                        await randomDelay(1000, 1500);
+                        try {
+                            const newUrl = page.url();
+                            return newUrl.includes('two_factor') || newUrl.includes('challenge');
+                        } catch (e2) {
+                            return false; // Assume success if we can't get URL
+                        }
+                    }
+                };
+
+                // Check if still on 2FA page after Strategy 1
+                if (await isStillOn2FAPage()) {
                     // Strategy 2: JavaScript click
                     logger.info('[2FA] Still on 2FA page, trying Strategy 2 (JS click)...');
-                    await page.evaluate((sel) => {
-                        const btn = document.querySelector(sel) ||
-                            document.querySelector('button[type="submit"]') ||
-                            Array.from(document.querySelectorAll('button')).find(b =>
-                                b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
-                            );
-                        if (btn) btn.click();
-                    }, submitSelector);
-                    logger.info('[2FA] Strategy 2 (JS click): ✅');
+                    try {
+                        await page.evaluate((sel) => {
+                            const btn = document.querySelector(sel) ||
+                                document.querySelector('button[type="submit"]') ||
+                                Array.from(document.querySelectorAll('button')).find(b =>
+                                    b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
+                                );
+                            if (btn) btn.click();
+                        }, submitSelector);
+                        logger.info('[2FA] Strategy 2 (JS click): ✅');
+                    } catch (e) {
+                        logger.debug(`[2FA] Strategy 2 error: ${e.message}`);
+                    }
 
                     await randomDelay(500, 800);
                 }
 
                 // Check again
-                if (page.url().includes('two_factor')) {
+                if (await isStillOn2FAPage()) {
                     // Strategy 3: Dispatchevent click
                     logger.info('[2FA] Trying Strategy 3 (dispatchEvent)...');
-                    await page.evaluate(() => {
-                        const btn = document.querySelector('button[type="submit"]') ||
-                            Array.from(document.querySelectorAll('button')).find(b =>
-                                b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
-                            );
-                        if (btn) {
-                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        }
-                    });
-                    logger.info('[2FA] Strategy 3 (dispatchEvent): ✅');
+                    try {
+                        await page.evaluate(() => {
+                            const btn = document.querySelector('button[type="submit"]') ||
+                                Array.from(document.querySelectorAll('button')).find(b =>
+                                    b.textContent.includes('Confirm') || b.textContent.includes('Confirmar')
+                                );
+                            if (btn) {
+                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                            }
+                        });
+                        logger.info('[2FA] Strategy 3 (dispatchEvent): ✅');
+                    } catch (e) {
+                        logger.debug(`[2FA] Strategy 3 error: ${e.message}`);
+                    }
 
                     await randomDelay(500, 800);
                 }
 
                 // Check again
-                if (page.url().includes('two_factor')) {
+                if (await isStillOn2FAPage()) {
                     // Strategy 4: Form submit
                     logger.info('[2FA] Trying Strategy 4 (form.submit)...');
-                    await page.evaluate(() => {
-                        const forms = document.querySelectorAll('form');
-                        forms.forEach(f => {
-                            try { f.submit(); } catch (e) { }
+                    try {
+                        await page.evaluate(() => {
+                            const forms = document.querySelectorAll('form');
+                            forms.forEach(f => {
+                                try { f.submit(); } catch (e) { }
+                            });
                         });
-                    });
+                    } catch (e) {
+                        logger.debug(`[2FA] Strategy 4 error: ${e.message}`);
+                    }
 
                     await randomDelay(500, 800);
                 }
 
                 // Strategy 5: Enter key as final fallback
-                if (page.url().includes('two_factor')) {
+                if (await isStillOn2FAPage()) {
                     logger.info('[2FA] Trying Strategy 5 (Enter key)...');
-                    await codeInput.focus();
-                    await page.keyboard.press('Enter');
+                    try {
+                        await codeInput.focus();
+                        await page.keyboard.press('Enter');
+                    } catch (e) {
+                        logger.debug(`[2FA] Strategy 5 error: ${e.message}`);
+                    }
                 }
             }
 
@@ -1075,44 +1117,85 @@ class InstagramService {
                 logger.error(`[2FA] ❌ Error messages detected: ${errorMessages.join(' | ')}`);
             }
 
-            // Check if we're still on 2FA page
-            if (urlAfterSubmit.includes('two_factor') || urlAfterSubmit.includes('challenge')) {
-                logger.warn('[2FA] ⚠️ Still on 2FA/challenge page after submit');
-
-                // ⭐ IMPROVEMENT 4: Retry with new code
-                if (retryCount < MAX_2FA_RETRIES - 1) {
-                    logger.info(`[2FA] 🔄 Retrying with fresh TOTP code (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
-
-                    // Wait for new TOTP period
-                    const waitForNewCode = 31000; // Wait 31 seconds to ensure new code
-                    logger.info(`[2FA] ⏳ Waiting ${waitForNewCode / 1000}s for next TOTP period...`);
-                    await new Promise(resolve => setTimeout(resolve, waitForNewCode));
-
-                    // Clear input and retry
-                    try {
-                        const retryInput = await page.$('input[name="verificationCode"]') ||
-                            await page.$('input[type="text"][maxlength="6"]');
-                        if (retryInput) {
-                            await retryInput.fill('');
-                        }
-                    } catch (e) { /* ignore */ }
-
-                    return await this.handle2FAChallenge(page, account, retryCount + 1);
+            // Check if we're still on 2FA page or if we succeeded
+            // SUCCESS URLs: onetap (save login), home page, feed, etc.
+            const successIndicators = ['onetap', 'instagram.com/$', 'instagram.com/?'];
+            const isSuccess = successIndicators.some(indicator => {
+                if (indicator.includes('$')) {
+                    // Exact match for home
+                    return urlAfterSubmit === 'https://www.instagram.com/' ||
+                        urlAfterSubmit.endsWith('instagram.com/');
                 }
+                return urlAfterSubmit.includes(indicator);
+            });
 
-                logger.error(`[2FA] ❌ All ${MAX_2FA_RETRIES} attempts failed`);
-                return false;
+            // Also check: NOT on two_factor AND NOT on challenge
+            const stillOnChallenge = urlAfterSubmit.includes('two_factor') ||
+                urlAfterSubmit.includes('challenge');
+
+            if (isSuccess || !stillOnChallenge) {
+                // Success! 
+                logger.info('[2FA] ✅ Successfully passed 2FA challenge!');
+                logger.info(`[2FA] New URL: ${urlAfterSubmit}`);
+                return true;
             }
 
-            // Success! Navigated away from 2FA page
-            logger.info('[2FA] ✅ Successfully passed 2FA challenge!');
-            logger.info(`[2FA] New URL: ${urlAfterSubmit}`);
-            return true;
+            // Still on challenge page
+            logger.warn('[2FA] ⚠️ Still on 2FA/challenge page after submit');
+
+            // ⭐ IMPROVEMENT 4: Retry with new code
+            if (retryCount < MAX_2FA_RETRIES - 1) {
+                logger.info(`[2FA] 🔄 Retrying with fresh TOTP code (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
+
+                // Wait for new TOTP period
+                const waitForNewCode = 31000; // Wait 31 seconds to ensure new code
+                logger.info(`[2FA] ⏳ Waiting ${waitForNewCode / 1000}s for next TOTP period...`);
+                await new Promise(resolve => setTimeout(resolve, waitForNewCode));
+
+                // Clear input and retry
+                try {
+                    const retryInput = await page.$('input[name="verificationCode"]') ||
+                        await page.$('input[type="text"][maxlength="6"]');
+                    if (retryInput) {
+                        await retryInput.fill('');
+                    }
+                } catch (e) { /* ignore */ }
+
+                return await this.handle2FAChallenge(page, account, retryCount + 1);
+            }
+
+            logger.error(`[2FA] ❌ All ${MAX_2FA_RETRIES} attempts failed`);
+            return false;
 
         } catch (error) {
             logger.error('[2FA] ❌ Exception in 2FA handler:', error.message);
 
-            // Retry on exception
+            // IMPORTANT: Check if we actually succeeded despite the exception
+            // (navigation during click can cause exceptions but still work)
+            try {
+                const currentUrl = page.url();
+                logger.info(`[2FA] Exception occurred, but checking URL: ${currentUrl}`);
+
+                // If we're on onetap or home, 2FA actually succeeded!
+                if (currentUrl.includes('onetap') ||
+                    (currentUrl.includes('instagram.com') && !currentUrl.includes('two_factor') && !currentUrl.includes('challenge'))) {
+                    logger.info('[2FA] ✅ Exception occurred but 2FA actually succeeded! (navigation completed)');
+                    return true;
+                }
+            } catch (urlError) {
+                // Can't get URL, page might be navigating = potential success
+                logger.info('[2FA] Could not check URL, waiting...');
+                await randomDelay(2000, 3000);
+                try {
+                    const newUrl = page.url();
+                    if (!newUrl.includes('two_factor') && !newUrl.includes('challenge')) {
+                        logger.info('[2FA] ✅ 2FA succeeded after exception!');
+                        return true;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            // Retry on exception if we're still on 2FA page
             if (retryCount < MAX_2FA_RETRIES - 1) {
                 logger.info(`[2FA] 🔄 Retrying after exception (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
                 await randomDelay(5000, 8000);
