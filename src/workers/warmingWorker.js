@@ -123,12 +123,31 @@ class WarmingWorker {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000
             });
-            await randomDelay(3000, 5000);
+
+            // ⭐ CRITICAL: Wait for JavaScript to fully execute (Instagram is a React SPA)
+            logger.info('[WARMING] Step 1: Waiting for JavaScript to render...');
+            try {
+                // Wait for any input or button to appear (React hydration)
+                await page.waitForFunction(() => {
+                    return document.querySelectorAll('input').length > 0 ||
+                        document.querySelectorAll('button').length > 0 ||
+                        document.body.innerText.length > 100;
+                }, { timeout: 30000 });
+                logger.info('[WARMING] Step 1: ✅ JavaScript rendered content');
+            } catch (e) {
+                logger.warn('[WARMING] Step 1: Timeout waiting for JS render, continuing...');
+            }
+
+            // Additional wait for full page load
+            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+            logger.info('[WARMING] Step 1: ✅ Login page loaded');
+
+            await randomDelay(3000, 5000);  // Longer delay to let React fully hydrate
 
             // Step 2: Handle cookie consent
             logger.info('[WARMING] Step 2: Handling cookie consent...');
             await this.handleCookieConsent(page);
-            await randomDelay(1000, 2000);
+            await randomDelay(2000, 3000); // Longer wait after cookie consent
 
             // Step 3: Wait for page to load and find username field
             logger.info('[WARMING] Step 3: Waiting for username field...');
@@ -352,28 +371,82 @@ class WarmingWorker {
 
     /**
      * Handle cookie consent dialog
+     * ⭐ PORTED FROM instagram.service.js - Full robust version
      */
     async handleCookieConsent(page) {
         try {
             await randomDelay(1000, 2000);
 
+            // Multiple possible selectors for cookie consent
             const cookieSelectors = [
+                // English variants
                 'button:has-text("Allow all cookies")',
-                'button:has-text("Permitir todos os cookies")',
+                'button:has-text("Allow essential and optional cookies")',
                 'button:has-text("Accept All")',
-                'button:has-text("Aceitar tudo")'
+                'button:has-text("Accept")',
+                'button:has-text("Only allow essential cookies")',
+                // Portuguese variants
+                'button:has-text("Permitir todos os cookies")',
+                'button:has-text("Permitir cookies essenciais e opcionais")',
+                'button:has-text("Aceitar tudo")',
+                'button:has-text("Aceitar")',
+                'button:has-text("Permitir somente cookies essenciais")',
+                // Generic patterns
+                '[role="dialog"] button:first-of-type',
+                'div[role="dialog"] button',
+                'button._a9--._a9_1',
             ];
 
+            let clicked = false;
             for (const selector of cookieSelectors) {
-                const btn = await page.$(selector);
-                if (btn && await btn.isVisible()) {
-                    await btn.click();
-                    await randomDelay(1500, 2500);
-                    break;
+                try {
+                    const btn = await page.$(selector);
+                    if (btn) {
+                        const isVisible = await btn.isVisible();
+                        if (isVisible) {
+                            await btn.click();
+                            logger.info(`[WARMING] ✅ Cookie consent clicked: ${selector}`);
+                            clicked = true;
+                            await randomDelay(2000, 3000);
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    // Try next selector
                 }
             }
+
+            if (!clicked) {
+                // Try clicking any visible button in a dialog
+                const dialogButtons = await page.$$('[role="dialog"] button, [role="presentation"] button');
+                for (const btn of dialogButtons) {
+                    try {
+                        const isVisible = await btn.isVisible();
+                        if (isVisible) {
+                            const text = await btn.textContent();
+                            logger.info(`[WARMING] Found dialog button: "${text}"`);
+                            if (text && (text.toLowerCase().includes('allow') ||
+                                text.toLowerCase().includes('accept') ||
+                                text.toLowerCase().includes('permitir') ||
+                                text.toLowerCase().includes('aceitar'))) {
+                                await btn.click();
+                                logger.info('[WARMING] ✅ Clicked cookie button by text match');
+                                clicked = true;
+                                await randomDelay(2000, 3000);
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+            }
+
+            if (!clicked) {
+                logger.warn('[WARMING] No cookie consent button found - continuing anyway');
+            }
         } catch (e) {
-            logger.debug('[WARMING] No cookie consent found');
+            logger.warn(`[WARMING] Cookie consent handling error: ${e.message}`);
         }
     }
 
