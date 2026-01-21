@@ -1274,6 +1274,37 @@ class InstagramService {
             const stillOnChallenge = urlAfterSubmit.includes('two_factor') ||
                 urlAfterSubmit.includes('challenge');
 
+            // ⭐ NEW: Check for BAD states that should NOT be considered success
+            const badStatePatterns = [
+                '/accounts/suspended',
+                '/accounts/disabled',
+                '/accounts/banned',
+                '/checkpoint/',
+                'confirm_email',
+                'confirm_phone'
+            ];
+            const isInBadState = badStatePatterns.some(pattern => urlAfterSubmit.includes(pattern));
+
+            if (isInBadState) {
+                logger.error(`[2FA] ❌ Account is in a bad state: ${urlAfterSubmit}`);
+
+                // Detect specific state
+                if (urlAfterSubmit.includes('suspended')) {
+                    logger.error('[2FA] ❌ Account is SUSPENDED - requires human verification');
+                } else if (urlAfterSubmit.includes('disabled') || urlAfterSubmit.includes('banned')) {
+                    logger.error('[2FA] ❌ Account is BANNED/DISABLED');
+                } else if (urlAfterSubmit.includes('checkpoint')) {
+                    logger.error('[2FA] ❌ Account requires checkpoint verification');
+                } else if (urlAfterSubmit.includes('confirm_')) {
+                    logger.error('[2FA] ❌ Account requires email/phone verification');
+                }
+
+                // 📸 DEBUG SCREENSHOT
+                await this.uploadDebugScreenshot(page, '2fa-bad-state');
+
+                return false;
+            }
+
             if (isSuccess || !stillOnChallenge) {
                 // Success! 
                 logger.info('[2FA] ✅ Successfully passed 2FA challenge!');
