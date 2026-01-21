@@ -83,6 +83,7 @@ class WarmingWorker {
 
     /**
      * Perform login for a warming account
+     * ⭐ PORTED FROM instagram.service.js - Full robust login logic
      * @param {BrowserContext} context
      * @param {Object} account
      * @returns {Promise<boolean>}
@@ -91,7 +92,9 @@ class WarmingWorker {
         const page = await context.newPage();
 
         try {
-            logger.info(`[WARMING] Starting login for ${account.username}`);
+            logger.info(`[WARMING] ========================================`);
+            logger.info(`[WARMING] 🔐 Starting login for ${account.username}`);
+            logger.info(`[WARMING] ========================================`);
 
             // Check for existing session
             if (account.session_data && Array.isArray(account.session_data)) {
@@ -107,37 +110,94 @@ class WarmingWorker {
 
                 const isLoggedIn = await this.checkLoggedIn(page);
                 if (isLoggedIn) {
-                    logger.info(`[WARMING] Session valid for ${account.username}`);
+                    logger.info(`[WARMING] ✅ Session valid for ${account.username}`);
                     await page.close();
                     return true;
                 }
                 logger.warn(`[WARMING] Session expired, re-logging...`);
             }
 
-            // Fresh login
+            // Step 1: Navigate to login page
+            logger.info('[WARMING] Step 1: Navigating to login page...');
             await page.goto('https://www.instagram.com/accounts/login/', {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000
             });
-
             await randomDelay(3000, 5000);
 
-            // Handle cookie consent
+            // Step 2: Handle cookie consent
+            logger.info('[WARMING] Step 2: Handling cookie consent...');
             await this.handleCookieConsent(page);
+            await randomDelay(1000, 2000);
 
-            // Fill username
-            const usernameInput = await page.waitForSelector('input[name="username"]', { timeout: 15000 });
-            await usernameInput.fill(account.username);
-            await randomDelay(500, 1000);
+            // Step 3: Wait for page to load and find username field
+            logger.info('[WARMING] Step 3: Waiting for username field...');
+            const usernameSelectors = [
+                'input[name="username"]',
+                'input[aria-label="Phone number, username, or email"]',
+                'input[aria-label="Telefone, nome de usuário ou email"]',
+                'input[type="text"]',
+                'form input:first-of-type'
+            ];
 
-            // Fill password
-            const passwordInput = await page.$('input[name="password"]');
-            if (passwordInput) {
-                await passwordInput.fill(account.password);
+            let usernameInput = null;
+            for (const selector of usernameSelectors) {
+                try {
+                    await page.waitForSelector(selector, { timeout: 5000 });
+                    usernameInput = await page.$(selector);
+                    if (usernameInput) {
+                        logger.info(`[WARMING] Found username field: ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
             }
+
+            if (!usernameInput) {
+                logger.error('[WARMING] ❌ Could not find username input field!');
+                await page.close();
+                return false;
+            }
+
+            await usernameInput.fill(account.username);
+            logger.info('[WARMING] Step 3: ✅ Username filled');
             await randomDelay(500, 1000);
 
-            // Click login - use multiple selectors with fallbacks (Instagram changes frequently)
+            // Step 4: Fill password - try multiple selectors
+            logger.info('[WARMING] Step 4: Filling password...');
+            const passwordSelectors = [
+                'input[name="password"]',
+                'input[type="password"]',
+                'input[aria-label*="password"]',
+                'input[aria-label*="Senha"]',
+            ];
+
+            let passwordFilled = false;
+            for (const selector of passwordSelectors) {
+                try {
+                    const pwdField = await page.$(selector);
+                    if (pwdField) {
+                        await pwdField.fill(account.password);
+                        passwordFilled = true;
+                        logger.info(`[WARMING] Step 4: ✅ Password filled using ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            if (!passwordFilled) {
+                logger.error('[WARMING] ❌ Could not find password field');
+                await page.close();
+                return false;
+            }
+
+            await randomDelay(500, 1000);
+
+            // Step 5: Click login button - try multiple selectors
+            logger.info('[WARMING] Step 5: Clicking login button...');
             const loginButtonSelectors = [
                 'button[type="submit"]',
                 'button:has-text("Log in")',
@@ -156,7 +216,7 @@ class WarmingWorker {
                     if (btn && await btn.isVisible()) {
                         await btn.click({ force: true });
                         loginClicked = true;
-                        logger.info(`[WARMING] Clicked login button: ${selector}`);
+                        logger.info(`[WARMING] Step 5: ✅ Clicked login button: ${selector}`);
                         break;
                     }
                 } catch (e) {
@@ -165,11 +225,11 @@ class WarmingWorker {
             }
 
             // ALWAYS try Enter key as redundancy (most reliable)
-            logger.info('[WARMING] Pressing Enter key as redundancy...');
+            logger.info('[WARMING] Step 5: Pressing Enter key as redundancy...');
             await page.keyboard.press('Enter');
             await randomDelay(1000, 1500);
 
-            // Try clicking again with JavaScript if first click didn't work
+            // Try clicking with JavaScript fallback
             if (!loginClicked) {
                 try {
                     await page.evaluate(() => {
@@ -182,46 +242,109 @@ class WarmingWorker {
                             }
                         }
                     });
-                    logger.info('[WARMING] Clicked login button via JavaScript');
+                    logger.info('[WARMING] Step 5: ✅ JavaScript click executed');
                 } catch (e) { /* ignore */ }
             }
 
-            await randomDelay(5000, 8000);
+            // Wait for response
+            logger.info('[WARMING] Step 5: Waiting for response...');
+            await randomDelay(6000, 10000);
 
-            // Check for 2FA
-            const currentUrl = page.url();
-            if (currentUrl.includes('two_factor') || currentUrl.includes('challenge')) {
+            let currentUrl = page.url();
+            logger.info(`[WARMING] Step 6: Current URL after login: ${currentUrl}`);
+
+            // Step 6: Check for error messages
+            const errorMessage = await page.$('p[data-testid="login-error-message"]');
+            if (errorMessage) {
+                const errorText = await errorMessage.textContent();
+                logger.error(`[WARMING] ❌ Error message: ${errorText}`);
+                await page.close();
+                return false;
+            }
+
+            // Step 7: Check for 2FA (by URL or content)
+            if (currentUrl.includes('challenge') || currentUrl.includes('checkpoint') || currentUrl.includes('two_factor')) {
+                logger.info('[WARMING] 🔐 2FA/Challenge detected by URL');
                 if (account.totp_secret) {
                     const success = await this.handle2FA(page, account);
                     if (!success) {
                         await page.close();
                         return false;
                     }
+                    // Update URL after 2FA
+                    currentUrl = page.url();
+                    logger.info(`[WARMING] Updated URL after 2FA: ${currentUrl}`);
                 } else {
-                    logger.error(`[WARMING] 2FA required but no TOTP secret configured`);
+                    logger.error('[WARMING] ❌ 2FA required but no TOTP secret configured');
                     await page.close();
                     return false;
                 }
             }
 
-            // Handle post-login popups
+            // Also check for 2FA by page content (URL may still show /login/#)
+            if (currentUrl.includes('/accounts/login')) {
+                const pageText = await page.evaluate(() => document.body?.innerText || '');
+
+                const is2FAByContent =
+                    pageText.includes('código de 6 dígitos') ||
+                    pageText.includes('6-digit code') ||
+                    pageText.includes('Código de segurança') ||
+                    pageText.includes('Security code') ||
+                    pageText.includes('app de autenticação') ||
+                    pageText.includes('authentication app');
+
+                if (is2FAByContent && account.totp_secret) {
+                    logger.info('[WARMING] 🔐 2FA detected by page content');
+                    const success = await this.handle2FA(page, account);
+                    if (!success) {
+                        await page.close();
+                        return false;
+                    }
+                    currentUrl = page.url();
+                } else if (currentUrl.includes('/accounts/login')) {
+                    // Check for specific errors
+                    if (pageText.includes('senha incorreta') || pageText.includes('password was incorrect')) {
+                        logger.error('[WARMING] ❌ Password incorrect');
+                    } else if (pageText.includes('Aguarde alguns minutos') || pageText.includes('Please wait')) {
+                        logger.error('[WARMING] ❌ Rate limited - too many attempts');
+                    } else if (pageText.includes('suspeita') || pageText.includes('suspicious')) {
+                        logger.error('[WARMING] ❌ Suspicious activity detected');
+                    } else {
+                        logger.error('[WARMING] ❌ Still on login page - unknown error');
+                        logger.debug(`[WARMING] Page text: ${pageText.substring(0, 500)}`);
+                    }
+                    await page.close();
+                    return false;
+                }
+            }
+
+            // Step 8: Handle post-login popups
+            logger.info('[WARMING] Step 8: Handling post-login popups...');
             await this.handlePostLoginPopups(page);
 
-            // Verify login
+            // Step 9: Verify login
+            logger.info('[WARMING] Step 9: Verifying login success...');
             const isLoggedIn = await this.checkLoggedIn(page);
 
             if (isLoggedIn) {
                 // Save session
                 const cookies = await context.cookies();
                 await warmingPool.saveSession(account.id, cookies);
-                logger.info(`[WARMING] Login successful for ${account.username}`);
+                logger.info(`[WARMING] ✅ Login successful for ${account.username}`);
+            } else {
+                logger.error(`[WARMING] ❌ Login verification failed for ${account.username}`);
+                logger.error(`[WARMING] Final URL: ${page.url()}`);
             }
 
             await page.close();
             return isLoggedIn;
 
         } catch (error) {
-            logger.error(`[WARMING] Login error: ${error.message}`);
+            logger.error(`[WARMING] ❌ Login error: ${error.message}`);
+            try {
+                const url = page.url();
+                logger.error(`[WARMING] URL at error: ${url}`);
+            } catch (e) { /* ignore */ }
             try { await page.close(); } catch (e) { /* ignore */ }
             return false;
         }
