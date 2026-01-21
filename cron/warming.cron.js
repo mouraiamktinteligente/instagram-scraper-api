@@ -198,7 +198,7 @@ async function triggerManualWarm(accountId = null) {
         // Warm specific account
         const { data: account } = await warmingPool.supabase
             .from('warming_accounts')
-            .select('*, warming_proxies (*)')
+            .select('*, warming_proxies!proxy_id (*)')
             .eq('id', accountId)
             .single();
 

@@ -106,7 +106,7 @@ class WarmingPoolService {
                 .from('warming_accounts')
                 .select(`
                     *,
-                    warming_proxies (
+                    warming_proxies!proxy_id (
                         id, host, port, username, password
                     )
                 `)
