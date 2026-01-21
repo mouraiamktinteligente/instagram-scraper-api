@@ -89,30 +89,99 @@ async function checkAndPromoteAccounts() {
 }
 
 /**
- * Schedule warming jobs
+ * Generate random delay in milliseconds
+ * @param {number} minMs - Minimum delay
+ * @param {number} maxMs - Maximum delay
+ */
+function randomDelay(minMs, maxMs) {
+    return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+}
+
+/**
+ * Get random hour offset (0-45 minutes)
+ */
+function getRandomMinuteOffset() {
+    return Math.floor(Math.random() * 46); // 0-45 minutes
+}
+
+/**
+ * ⭐ HUMANIZED WARMING SCHEDULER
+ * Instead of fixed times, uses randomized intervals:
+ * - Base interval: 1.5-3 hours
+ * - Random minute offset: 0-45 min
+ * - Different pattern each day
+ */
+async function scheduleNextWarmingCycle() {
+    // Random interval between 1.5 to 3 hours (in ms)
+    const minInterval = 90 * 60 * 1000;   // 1.5 hours
+    const maxInterval = 180 * 60 * 1000;  // 3 hours
+    const nextInterval = randomDelay(minInterval, maxInterval);
+
+    const nextRunTime = new Date(Date.now() + nextInterval);
+    const hours = Math.floor(nextInterval / 1000 / 60 / 60);
+    const minutes = Math.floor((nextInterval / 1000 / 60) % 60);
+
+    logger.info(`[CRON:WARMING] 🎲 Next warming cycle in ${hours}h ${minutes}min (at ~${nextRunTime.toLocaleTimeString('pt-BR', { timeZone: TIMEZONE })})`);
+
+    setTimeout(async () => {
+        await executeWarmingCycle();
+        // Schedule next cycle recursively
+        scheduleNextWarmingCycle();
+    }, nextInterval);
+}
+
+/**
+ * Schedule warming jobs with humanized timing
  */
 function scheduleWarmingJobs() {
-    // Warming cycle - every 2 hours between 08:00-22:00 (last run at 22h)
-    // CRON: minute hour day month weekday
-    // '0 8-22/2 * * *' = At minute 0, every 2 hours from 8 to 22
-    cron.schedule('0 8-22/2 * * *', async () => {
-        await executeWarmingCycle();
+    // ⭐ HUMANIZED: Check every 30 minutes, but only execute with random probability
+    // This creates unpredictable but frequent enough warming sessions
+    cron.schedule('*/30 * * * *', async () => {
+        // Only run during allowed hours (08:00-23:00 Brasília)
+        if (!isWithinWarmingHours()) {
+            return;
+        }
+
+        // Random chance to execute (30% per check = avg 1 session per 1.5 hours)
+        const shouldRun = Math.random() < 0.30;
+
+        if (shouldRun) {
+            // Add random delay 0-10 minutes for extra randomness
+            const delay = randomDelay(0, 10 * 60 * 1000);
+            logger.info(`[CRON:WARMING] 🎲 Session triggered! Starting in ${Math.floor(delay / 1000 / 60)} minutes...`);
+
+            setTimeout(async () => {
+                await executeWarmingCycle();
+            }, delay);
+        }
     }, {
         scheduled: true,
         timezone: TIMEZONE
     });
 
-    logger.info('[CRON:WARMING] Warming cycle scheduled: every 2 hours (08:00-22:00 Brasília)');
+    logger.info('[CRON:WARMING] 🎲 Humanized warming scheduled: random intervals (avg 1.5-2h)');
 
-    // Promotion check - daily at midnight
-    cron.schedule('0 0 * * *', async () => {
+    // Promotion check - daily at random time between 00:00-06:00
+    const promotionHour = Math.floor(Math.random() * 6); // 0-5
+    const promotionMinute = Math.floor(Math.random() * 60);
+
+    cron.schedule(`${promotionMinute} ${promotionHour} * * *`, async () => {
         await checkAndPromoteAccounts();
     }, {
         scheduled: true,
         timezone: TIMEZONE
     });
 
-    logger.info('[CRON:WARMING] Promotion check scheduled: daily at 00:00 Brasília');
+    logger.info(`[CRON:WARMING] 📅 Promotion check scheduled: daily at ~${promotionHour}:${promotionMinute.toString().padStart(2, '0')} Brasília`);
+
+    // Initial warming cycle at startup (with random delay 1-5 minutes)
+    const startupDelay = randomDelay(60000, 300000);
+    logger.info(`[CRON:WARMING] 🚀 Initial warming in ${Math.floor(startupDelay / 1000)} seconds...`);
+
+    setTimeout(async () => {
+        logger.info('[CRON:WARMING] Running initial warming cycle...');
+        await executeWarmingCycle();
+    }, startupDelay);
 
     // Also run promotion check at startup (delayed by 30 seconds)
     setTimeout(async () => {
