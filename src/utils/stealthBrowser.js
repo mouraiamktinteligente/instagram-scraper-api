@@ -208,9 +208,6 @@ async function createStealthContext(browser, options = {}) {
         viewport,
         locale: config.locale,
         timezoneId: 'America/Sao_Paulo',
-        deviceScaleFactor: config.isMobile ? 3 : 1,
-        hasTouch: config.isMobile,
-        isMobile: config.isMobile,
         permissions: ['geolocation'],
 
         // Realistic color scheme
@@ -231,6 +228,17 @@ async function createStealthContext(browser, options = {}) {
             'Upgrade-Insecure-Requests': '1',
         }
     };
+
+    // Only add mobile-specific options for Chromium (Firefox doesn't support them in Playwright)
+    const isFirefox = browser.browserType().name() === 'firefox';
+    if (!isFirefox) {
+        contextOptions.isMobile = config.isMobile;
+        contextOptions.hasTouch = config.isMobile;
+        contextOptions.deviceScaleFactor = config.isMobile ? 3 : 1;
+        logger.debug(`[STEALTH] Added mobile options for Chromium: isMobile=${config.isMobile}`);
+    } else if (config.isMobile) {
+        logger.debug('[STEALTH] Firefox detected: Emulating mobile via User Agent only (isMobile option not supported)');
+    }
 
     const context = await browser.newContext(contextOptions);
 
