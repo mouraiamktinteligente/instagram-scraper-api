@@ -137,8 +137,55 @@ class WarmingWorker {
             }
             await randomDelay(500, 1000);
 
-            // Click login
-            await page.click('button[type="submit"]');
+            // Click login - use multiple selectors with fallbacks (Instagram changes frequently)
+            const loginButtonSelectors = [
+                'button[type="submit"]',
+                'button:has-text("Log in")',
+                'button:has-text("Log In")',
+                'button:has-text("Entrar")',
+                'div[role="button"]:has-text("Log in")',
+                'div[role="button"]:has-text("Entrar")',
+                'button._acan._acap._acas._aj1-._ap30',
+                'form button',
+            ];
+
+            let loginClicked = false;
+            for (const selector of loginButtonSelectors) {
+                try {
+                    const btn = await page.$(selector);
+                    if (btn && await btn.isVisible()) {
+                        await btn.click({ force: true });
+                        loginClicked = true;
+                        logger.info(`[WARMING] Clicked login button: ${selector}`);
+                        break;
+                    }
+                } catch (e) {
+                    // Try next selector
+                }
+            }
+
+            // ALWAYS try Enter key as redundancy (most reliable)
+            logger.info('[WARMING] Pressing Enter key as redundancy...');
+            await page.keyboard.press('Enter');
+            await randomDelay(1000, 1500);
+
+            // Try clicking again with JavaScript if first click didn't work
+            if (!loginClicked) {
+                try {
+                    await page.evaluate(() => {
+                        const btns = document.querySelectorAll('button, div[role="button"]');
+                        for (const btn of btns) {
+                            const text = btn.innerText?.toLowerCase() || '';
+                            if (text.includes('entrar') || text.includes('log in')) {
+                                btn.click();
+                                break;
+                            }
+                        }
+                    });
+                    logger.info('[WARMING] Clicked login button via JavaScript');
+                } catch (e) { /* ignore */ }
+            }
+
             await randomDelay(5000, 8000);
 
             // Check for 2FA
