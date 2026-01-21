@@ -19,6 +19,7 @@ const {
     sleep,
     humanMouseMove,
     humanClickAdvanced,
+    humanScroll,         // Added missing simple scroll
     humanScrollAdvanced,
     humanTypeAdvanced,
     maybeHesitate
@@ -413,18 +414,43 @@ class WarmingWorker {
      */
     async checkLoggedIn(page) {
         try {
+            const currentUrl = page.url();
+
+            // 🚩 NEW: Explicitly check for "BAD" pages that are NOT logged in states
+            const badUrls = [
+                '/accounts/login',
+                '/accounts/suspended',
+                '/accounts/disabled',
+                '/accounts/banned',
+                '/checkpoint/',
+                'confirm_email',
+                'confirm_phone'
+            ];
+
+            if (badUrls.some(url => currentUrl.includes(url))) {
+                logger.warn(`[WARMING] 🚩 Page state is not a valid login: ${currentUrl}`);
+                return false;
+            }
+
             const indicators = [
                 'svg[aria-label="Home"]',
                 'svg[aria-label="Início"]',
-                'a[href="/direct/inbox/"]'
+                'svg[aria-label="Feed"]',
+                'a[href="/direct/inbox/"]',
+                'section[role="main"]'
             ];
 
             for (const selector of indicators) {
                 const el = await page.$(selector);
-                if (el) return true;
+                if (el && await el.isVisible()) return true;
             }
 
-            return !page.url().includes('/accounts/login');
+            // Success indicators if URL looks good
+            const isAtHome = currentUrl === 'https://www.instagram.com/' ||
+                currentUrl.includes('instagram.com/direct/inbox') ||
+                currentUrl.includes('instagram.com/reels/');
+
+            return isAtHome;
         } catch (e) {
             return false;
         }
