@@ -208,15 +208,60 @@ class WarmingWorker {
 
     /**
      * Handle 2FA authentication
+     * Uses 2fa.live API for TOTP generation (same as instagram.service.js)
      */
     async handle2FA(page, account) {
         try {
-            const totpCode = speakeasy.totp({
-                secret: account.totp_secret,
-                encoding: 'base32'
-            });
+            logger.info(`[WARMING] 🔐 Handling 2FA for ${account.username}`);
 
-            logger.info(`[WARMING] Handling 2FA for ${account.username}`);
+            // Sanitize TOTP secret
+            const sanitizedSecret = account.totp_secret.replace(/\s+/g, '').toUpperCase();
+            logger.info(`[WARMING] 🔑 Secret length: ${sanitizedSecret.length} chars`);
+
+            let totpCode = null;
+
+            // ⭐ PRIMARY: Use 2fa.live API for TOTP generation
+            try {
+                logger.info(`[WARMING] 🌐 Fetching TOTP from 2fa.live API...`);
+
+                const https = require('https');
+                const fetch2faCode = () => {
+                    return new Promise((resolve, reject) => {
+                        const req = https.get(`https://2fa.live/tok/${sanitizedSecret}`, { timeout: 5000 }, (res) => {
+                            let data = '';
+                            res.on('data', chunk => data += chunk);
+                            res.on('end', () => {
+                                try {
+                                    const json = JSON.parse(data);
+                                    resolve(json.token);
+                                } catch (e) {
+                                    reject(new Error('Invalid JSON response'));
+                                }
+                            });
+                        });
+                        req.on('error', reject);
+                        req.on('timeout', () => {
+                            req.destroy();
+                            reject(new Error('Request timeout'));
+                        });
+                    });
+                };
+
+                totpCode = await fetch2faCode();
+                logger.info(`[WARMING] ✅ 2fa.live returned code: ${totpCode}`);
+
+            } catch (apiError) {
+                logger.warn(`[WARMING] ⚠️ 2fa.live API failed: ${apiError.message}`);
+                logger.info(`[WARMING] 🔄 Falling back to local speakeasy generation...`);
+
+                // FALLBACK: Use local speakeasy if API fails
+                totpCode = speakeasy.totp({
+                    secret: sanitizedSecret,
+                    encoding: 'base32',
+                    step: 30
+                });
+                logger.info(`[WARMING] ✅ Speakeasy fallback code: ${totpCode}`);
+            }
 
             await randomDelay(2000, 3000);
 
@@ -231,63 +276,136 @@ class WarmingWorker {
             let codeInput = null;
             for (const selector of codeInputSelectors) {
                 codeInput = await page.$(selector);
-                if (codeInput && await codeInput.isVisible()) break;
+                if (codeInput && await codeInput.isVisible()) {
+                    logger.info(`[WARMING] ✅ Found input: ${selector}`);
+                    break;
+                }
             }
 
             if (!codeInput) {
-                logger.error('[WARMING] 2FA input not found');
+                logger.error('[WARMING] ❌ 2FA input not found');
                 return false;
             }
 
+            // Fill code with human-like typing
             await codeInput.fill('');
             await codeInput.type(totpCode, { delay: 150 });
+            logger.info(`[WARMING] 📝 Typed code: ${totpCode}`);
             await randomDelay(1000, 1500);
 
-            // Submit
-            const submitBtn = await page.$('button[type="submit"]');
-            if (submitBtn) {
-                await submitBtn.click();
-            } else {
-                await page.keyboard.press('Enter');
+            // Find and click submit button
+            const submitSelectors = [
+                'button:has-text("Confirmar")',
+                'button:has-text("Confirm")',
+                'button[type="submit"]'
+            ];
+
+            let submitBtn = null;
+            for (const selector of submitSelectors) {
+                submitBtn = await page.$(selector);
+                if (submitBtn && await submitBtn.isVisible()) {
+                    logger.info(`[WARMING] ✅ Found submit button: ${selector}`);
+                    break;
+                }
             }
 
-            await randomDelay(4000, 6000);
+            if (submitBtn) {
+                await submitBtn.click();
+                logger.info('[WARMING] 🖱️ Submit button clicked');
+            } else {
+                await page.keyboard.press('Enter');
+                logger.info('[WARMING] ⌨️ Enter key pressed');
+            }
+
+            // Wait for navigation/response
+            await randomDelay(5000, 7000);
 
             // Check if still on 2FA page
             const url = page.url();
-            return !url.includes('two_factor') && !url.includes('challenge');
+            const success = !url.includes('two_factor') && !url.includes('challenge');
+
+            if (success) {
+                logger.info(`[WARMING] ✅ 2FA passed! New URL: ${url}`);
+            } else {
+                logger.error(`[WARMING] ❌ Still on 2FA page: ${url}`);
+            }
+
+            return success;
 
         } catch (error) {
-            logger.error(`[WARMING] 2FA error: ${error.message}`);
+            logger.error(`[WARMING] ❌ 2FA error: ${error.message}`);
             return false;
         }
     }
 
     /**
      * Handle post-login popups
+     * Updated with Portuguese selectors (same as instagram.service.js)
      */
     async handlePostLoginPopups(page) {
         await randomDelay(2000, 3000);
 
-        // Dismiss "Save login info" popup
+        // Check page text for popup indicators
         try {
-            const notNowButtons = await page.$$('button:has-text("Not Now")');
-            for (const btn of notNowButtons) {
-                if (await btn.isVisible()) {
-                    await btn.click();
-                    await randomDelay(1000, 2000);
-                }
+            const pageText = await page.evaluate(() => document.body?.innerText || '');
+
+            // Check for "Save Login Info" popup
+            const hasSaveInfoPopup =
+                pageText.includes('Salvar suas informações de login') ||
+                pageText.includes('Save your login info') ||
+                pageText.includes('Salvar informações');
+
+            if (hasSaveInfoPopup) {
+                logger.info('[WARMING] ✅ Detected "Save Login Info" popup');
             }
         } catch (e) { /* ignore */ }
 
+        // Dismiss "Save login info" popup (PT and EN)
+        const saveInfoSelectors = [
+            'button:has-text("Salvar informações")',
+            'button:has-text("Salvar info")',
+            'button:has-text("Save Info")',
+            'button:has-text("Agora não")',
+            'button:has-text("Not Now")',
+            'div[role="button"]:has-text("Agora não")',
+            'div[role="button"]:has-text("Not Now")'
+        ];
+
+        for (const selector of saveInfoSelectors) {
+            try {
+                const btn = await page.$(selector);
+                if (btn && await btn.isVisible()) {
+                    await btn.click();
+                    logger.info(`[WARMING] ✅ Clicked popup button: ${selector}`);
+                    await randomDelay(1500, 2500);
+                    break;
+                }
+            } catch (e) { /* try next */ }
+        }
+
         // Dismiss notifications popup
-        try {
-            const notNow = await page.$('button:has-text("Not Now")');
-            if (notNow && await notNow.isVisible()) {
-                await notNow.click();
-                await randomDelay(1000, 2000);
-            }
-        } catch (e) { /* ignore */ }
+        await randomDelay(1000, 2000);
+        const notificationSelectors = [
+            'button:has-text("Agora não")',
+            'button:has-text("Not Now")',
+            'button:has-text("Ativar")',
+            'button:has-text("Turn On")'
+        ];
+
+        for (const selector of notificationSelectors) {
+            try {
+                const btn = await page.$(selector);
+                if (btn && await btn.isVisible()) {
+                    // Click "Not Now" / "Agora não", not "Turn On"
+                    if (!selector.includes('Ativar') && !selector.includes('Turn On')) {
+                        await btn.click();
+                        logger.info(`[WARMING] ✅ Dismissed notification popup: ${selector}`);
+                        await randomDelay(1000, 2000);
+                        break;
+                    }
+                }
+            } catch (e) { /* try next */ }
+        }
     }
 
     /**
