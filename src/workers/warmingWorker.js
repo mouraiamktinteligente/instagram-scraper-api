@@ -452,21 +452,64 @@ class WarmingWorker {
 
     /**
      * Handle 2FA authentication
-     * Uses 2fa.live API for TOTP generation (same as instagram.service.js)
+     * ⭐ FULLY PORTED FROM instagram.service.js - Complete robust version
+     * Features: time sync, 11 input selectors, 7 submit selectors, retry logic, bad state detection
+     * @param {Page} page
+     * @param {Object} account
+     * @param {number} retryCount - Current retry attempt (max 3)
+     * @returns {Promise<boolean>}
      */
-    async handle2FA(page, account) {
-        try {
-            logger.info(`[WARMING] 🔐 Handling 2FA for ${account.username}`);
+    async handle2FA(page, account, retryCount = 0) {
+        const MAX_2FA_RETRIES = 3;
 
-            // Sanitize TOTP secret
+        // Check if account has TOTP secret
+        if (!account.totp_secret) {
+            logger.warn('[WARMING:2FA] Account does not have TOTP secret configured');
+            return false;
+        }
+
+        try {
+            logger.info('[WARMING:2FA] ========================================');
+            logger.info(`[WARMING:2FA] 🔐 2FA ATTEMPT ${retryCount + 1}/${MAX_2FA_RETRIES}`);
+            logger.info('[WARMING:2FA] ========================================');
+            logger.info(`[WARMING:2FA] Account: ${account.username}`);
+            logger.info(`[WARMING:2FA] TOTP Secret (first 8 chars): ${account.totp_secret.substring(0, 8)}...`);
+            logger.info(`[WARMING:2FA] Current URL: ${page.url()}`);
+
+            // ⭐ TIME SYNC CHECK: Log server time for debugging
+            const serverTime = new Date();
+            logger.info(`[WARMING:2FA] ⏱️ Server time: ${serverTime.toISOString()}`);
+
+            // Wait for the 2FA page to fully load
+            logger.info('[WARMING:2FA] Waiting for 2FA page to stabilize...');
+            await randomDelay(2000, 3000);
+
+            // Wait for network idle
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 5000 });
+            } catch (e) { /* ignore timeout */ }
+
+            // ⭐ IMPROVEMENT 1: Generate TOTP with time tolerance
+            // Wait until we're at least 5 seconds into a new period to avoid expiration during submission
+            const currentTime = Math.floor(Date.now() / 1000);
+            const timeInPeriod = currentTime % 30;
+
+            if (timeInPeriod > 25) {
+                // Too close to next period, wait for new code
+                const waitTime = (30 - timeInPeriod + 2) * 1000;
+                logger.info(`[WARMING:2FA] ⏳ Waiting ${waitTime}ms for fresh TOTP code (current position: ${timeInPeriod}s)`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+
+            // ⭐ Sanitize TOTP secret: remove spaces and convert to uppercase
             const sanitizedSecret = account.totp_secret.replace(/\s+/g, '').toUpperCase();
-            logger.info(`[WARMING] 🔑 Secret length: ${sanitizedSecret.length} chars`);
+            logger.info(`[WARMING:2FA] 🔑 Secret length: ${sanitizedSecret.length} chars`);
 
             let totpCode = null;
 
             // ⭐ PRIMARY: Use 2fa.live API for TOTP generation
             try {
-                logger.info(`[WARMING] 🌐 Fetching TOTP from 2fa.live API...`);
+                logger.info(`[WARMING:2FA] 🌐 Fetching TOTP from 2fa.live API...`);
 
                 const https = require('https');
                 const fetch2faCode = () => {
@@ -492,92 +535,302 @@ class WarmingWorker {
                 };
 
                 totpCode = await fetch2faCode();
-                logger.info(`[WARMING] ✅ 2fa.live returned code: ${totpCode}`);
+                logger.info(`[WARMING:2FA] ✅ 2fa.live returned code: ${totpCode}`);
 
             } catch (apiError) {
-                logger.warn(`[WARMING] ⚠️ 2fa.live API failed: ${apiError.message}`);
-                logger.info(`[WARMING] 🔄 Falling back to local speakeasy generation...`);
+                logger.warn(`[WARMING:2FA] ⚠️ 2fa.live API failed: ${apiError.message}`);
+                logger.info(`[WARMING:2FA] 🔄 Falling back to local speakeasy generation...`);
 
                 // FALLBACK: Use local speakeasy if API fails
+                const totpWindow = retryCount === 0 ? 1 : 2;
                 totpCode = speakeasy.totp({
                     secret: sanitizedSecret,
                     encoding: 'base32',
+                    window: totpWindow,
                     step: 30
                 });
-                logger.info(`[WARMING] ✅ Speakeasy fallback code: ${totpCode}`);
+                logger.info(`[WARMING:2FA] ✅ Speakeasy fallback code: ${totpCode}`);
             }
 
-            await randomDelay(2000, 3000);
+            // Log timing info
+            const currentTimeInPeriod = Math.floor(Date.now() / 1000) % 30;
+            logger.info(`[WARMING:2FA] ⏰ Time in period: ${currentTimeInPeriod}s (code valid for ~${30 - currentTimeInPeriod}s)`);
 
-            // Find and fill 2FA input
+            // Look for 2FA code input field (11 selectors like instagram.service.js)
             const codeInputSelectors = [
                 'input[name="verificationCode"]',
                 'input[name="security_code"]',
+                'input[aria-label*="Security code"]',
+                'input[aria-label*="código"]',
+                'input[aria-label*="Código"]',
+                'input[aria-label*="Código de segurança"]',
+                'input[placeholder*="code"]',
+                'input[placeholder*="código"]',
                 'input[type="text"][maxlength="6"]',
-                'input[type="number"]'
+                'input[type="number"]',
+                'input[type="tel"]',
             ];
 
             let codeInput = null;
             for (const selector of codeInputSelectors) {
-                codeInput = await page.$(selector);
-                if (codeInput && await codeInput.isVisible()) {
-                    logger.info(`[WARMING] ✅ Found input: ${selector}`);
-                    break;
-                }
+                try {
+                    codeInput = await page.waitForSelector(selector, { timeout: 2000 });
+                    if (codeInput) {
+                        const isVisible = await codeInput.isVisible().catch(() => false);
+                        if (isVisible) {
+                            logger.info(`[WARMING:2FA] ✅ Found input: ${selector}`);
+                            break;
+                        }
+                        codeInput = null;
+                    }
+                } catch (e) { /* try next */ }
             }
 
             if (!codeInput) {
-                logger.error('[WARMING] ❌ 2FA input not found');
+                logger.error('[WARMING:2FA] ❌ Could not find 2FA code input field');
+                const inputs = await page.$$eval('input', inputs =>
+                    inputs.map(i => `${i.name || i.type || 'unknown'}[${i.placeholder || ''}]`)
+                );
+                logger.error(`[WARMING:2FA] Available inputs: ${inputs.join(', ')}`);
                 return false;
             }
 
-            // Fill code with human-like typing
+            // ⭐ Clear and type the code with human-like delay (digit by digit)
+            logger.info('[WARMING:2FA] 📝 Filling code input...');
+            await codeInput.click();
+            await randomDelay(200, 400);
             await codeInput.fill('');
-            await codeInput.type(totpCode, { delay: 150 });
-            logger.info(`[WARMING] 📝 Typed code: ${totpCode}`);
-            await randomDelay(1000, 1500);
+            await randomDelay(100, 200);
 
-            // Find and click submit button
+            // Type code one digit at a time for more human-like behavior
+            for (const digit of totpCode) {
+                await codeInput.type(digit, { delay: 100 + Math.random() * 100 });
+            }
+
+            // ⭐ Verify what was typed
+            const typedValue = await codeInput.inputValue();
+            logger.info(`[WARMING:2FA] Typed value: ${typedValue} (match: ${typedValue === totpCode})`);
+
+            if (typedValue !== totpCode) {
+                logger.error('[WARMING:2FA] ❌ Code mismatch! Retrying...');
+                await codeInput.fill('');
+                await codeInput.type(totpCode, { delay: 150 });
+            }
+
+            // Wait before submitting
+            await randomDelay(800, 1200);
+
+            // ⭐ Submit button with 7 selectors
             const submitSelectors = [
+                'button[type="submit"]',
                 'button:has-text("Confirmar")',
                 'button:has-text("Confirm")',
-                'button[type="submit"]'
+                'button:has-text("Verificar")',
+                'button:has-text("Verify")',
+                'div[role="button"]:has-text("Confirmar")',
+                'div[role="button"]:has-text("Confirm")',
             ];
 
             let submitBtn = null;
             for (const selector of submitSelectors) {
-                submitBtn = await page.$(selector);
-                if (submitBtn && await submitBtn.isVisible()) {
-                    logger.info(`[WARMING] ✅ Found submit button: ${selector}`);
-                    break;
+                try {
+                    submitBtn = await page.$(selector);
+                    if (submitBtn) {
+                        const isVisible = await submitBtn.isVisible().catch(() => false);
+                        if (isVisible) {
+                            logger.info(`[WARMING:2FA] ✅ Found submit button: ${selector}`);
+                            break;
+                        }
+                        submitBtn = null;
+                    }
+                } catch (e) { /* try next */ }
+            }
+
+            if (!submitBtn) {
+                logger.warn('[WARMING:2FA] No submit button found, trying Enter key...');
+                await codeInput.focus();
+                await randomDelay(200, 300);
+                await page.keyboard.press('Enter');
+            } else {
+                // ⭐ Click with waitForNavigation (critical!)
+                logger.info('[WARMING:2FA] 🖱️ Clicking submit button...');
+
+                try {
+                    await submitBtn.hover();
+                    await randomDelay(100, 200);
+
+                    // Click and wait for potential navigation
+                    await Promise.all([
+                        submitBtn.click(),
+                        page.waitForNavigation({ timeout: 10000, waitUntil: 'domcontentloaded' }).catch(() => { })
+                    ]);
+
+                    logger.info('[WARMING:2FA] ✅ Submit button clicked');
+                } catch (clickError) {
+                    logger.warn(`[WARMING:2FA] Click error: ${clickError.message}, trying Enter key...`);
+                    try {
+                        await codeInput.focus();
+                        await page.keyboard.press('Enter');
+                        logger.info('[WARMING:2FA] ✅ Fallback: Enter key pressed');
+                    } catch (e) { }
                 }
             }
 
-            if (submitBtn) {
-                await submitBtn.click();
-                logger.info('[WARMING] 🖱️ Submit button clicked');
-            } else {
-                await page.keyboard.press('Enter');
-                logger.info('[WARMING] ⌨️ Enter key pressed');
+            // Wait for Instagram to fully process the code
+            logger.info('[WARMING:2FA] ⏳ Waiting for Instagram to process code...');
+            await randomDelay(5000, 6000);
+
+            // Wait for network to settle
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 8000 });
+            } catch (e) { /* ignore timeout */ }
+
+            // ⭐ Check for error messages (PT + EN)
+            const urlAfterSubmit = page.url();
+            logger.info(`[WARMING:2FA] After submit - URL: ${urlAfterSubmit}`);
+
+            const errorMessages = await page.evaluate(() => {
+                const errorSelectors = [
+                    '[role="alert"]',
+                    '.error',
+                    '[class*="error"]',
+                    '[class*="Error"]',
+                ];
+
+                const errors = [];
+                for (const sel of errorSelectors) {
+                    const elements = document.querySelectorAll(sel);
+                    elements.forEach(el => {
+                        const text = el.textContent?.trim();
+                        if (text && text.length > 5) errors.push(text);
+                    });
+                }
+
+                // Also check page text for common error phrases
+                const pageText = document.body?.innerText || '';
+                const errorPhrases = [
+                    'código incorreto', 'incorrect code',
+                    'código inválido', 'invalid code',
+                    'tente novamente', 'try again',
+                    'expirou', 'expired',
+                ];
+
+                for (const phrase of errorPhrases) {
+                    if (pageText.toLowerCase().includes(phrase.toLowerCase())) {
+                        errors.push(`Found phrase: "${phrase}"`);
+                    }
+                }
+
+                return errors;
+            });
+
+            if (errorMessages.length > 0) {
+                logger.error(`[WARMING:2FA] ❌ Error messages detected: ${errorMessages.join(' | ')}`);
             }
 
-            // Wait for navigation/response
-            await randomDelay(5000, 7000);
+            // ⭐ Check for BAD states (suspended, banned, checkpoint)
+            const badStatePatterns = [
+                '/accounts/suspended',
+                '/accounts/disabled',
+                '/accounts/banned',
+                '/checkpoint/',
+                'confirm_email',
+                'confirm_phone'
+            ];
+            const isInBadState = badStatePatterns.some(pattern => urlAfterSubmit.includes(pattern));
 
-            // Check if still on 2FA page
-            const url = page.url();
-            const success = !url.includes('two_factor') && !url.includes('challenge');
+            if (isInBadState) {
+                logger.error(`[WARMING:2FA] ❌ Account is in a bad state: ${urlAfterSubmit}`);
 
-            if (success) {
-                logger.info(`[WARMING] ✅ 2FA passed! New URL: ${url}`);
-            } else {
-                logger.error(`[WARMING] ❌ Still on 2FA page: ${url}`);
+                if (urlAfterSubmit.includes('suspended')) {
+                    logger.error('[WARMING:2FA] ❌ Account is SUSPENDED - requires human verification');
+                } else if (urlAfterSubmit.includes('disabled') || urlAfterSubmit.includes('banned')) {
+                    logger.error('[WARMING:2FA] ❌ Account is BANNED/DISABLED');
+                } else if (urlAfterSubmit.includes('checkpoint')) {
+                    logger.error('[WARMING:2FA] ❌ Account requires checkpoint verification');
+                } else if (urlAfterSubmit.includes('confirm_')) {
+                    logger.error('[WARMING:2FA] ❌ Account requires email/phone verification');
+                }
+
+                return false;
             }
 
-            return success;
+            // Check success indicators
+            const successIndicators = ['onetap', 'instagram.com/$', 'instagram.com/?'];
+            const isSuccess = successIndicators.some(indicator => {
+                if (indicator.includes('$')) {
+                    return urlAfterSubmit === 'https://www.instagram.com/' ||
+                        urlAfterSubmit.endsWith('instagram.com/');
+                }
+                return urlAfterSubmit.includes(indicator);
+            });
+
+            const stillOnChallenge = urlAfterSubmit.includes('two_factor') ||
+                urlAfterSubmit.includes('challenge');
+
+            if (isSuccess || !stillOnChallenge) {
+                logger.info('[WARMING:2FA] ✅ Successfully passed 2FA challenge!');
+                logger.info(`[WARMING:2FA] New URL: ${urlAfterSubmit}`);
+                return true;
+            }
+
+            // ⭐ RETRY with new code
+            logger.warn('[WARMING:2FA] ⚠️ Still on 2FA/challenge page after submit');
+
+            if (retryCount < MAX_2FA_RETRIES - 1) {
+                logger.info(`[WARMING:2FA] 🔄 Retrying with fresh TOTP code (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
+
+                const waitForRetry = 5000;
+                logger.info(`[WARMING:2FA] ⏳ Waiting ${waitForRetry / 1000}s before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitForRetry));
+
+                // Clear input and retry
+                try {
+                    const retryInput = await page.$('input[name="verificationCode"]') ||
+                        await page.$('input[type="text"][maxlength="6"]');
+                    if (retryInput) {
+                        await retryInput.fill('');
+                    }
+                } catch (e) { /* ignore */ }
+
+                return await this.handle2FA(page, account, retryCount + 1);
+            }
+
+            logger.error(`[WARMING:2FA] ❌ All ${MAX_2FA_RETRIES} attempts failed`);
+            return false;
 
         } catch (error) {
-            logger.error(`[WARMING] ❌ 2FA error: ${error.message}`);
+            logger.error('[WARMING:2FA] ❌ Exception in 2FA handler:', error.message);
+
+            // ⭐ Check if we actually succeeded despite the exception
+            try {
+                const currentUrl = page.url();
+                logger.info(`[WARMING:2FA] Exception occurred, but checking URL: ${currentUrl}`);
+
+                if (currentUrl.includes('onetap') ||
+                    (currentUrl.includes('instagram.com') && !currentUrl.includes('two_factor') && !currentUrl.includes('challenge'))) {
+                    logger.info('[WARMING:2FA] ✅ Exception occurred but 2FA actually succeeded!');
+                    return true;
+                }
+            } catch (urlError) {
+                logger.info('[WARMING:2FA] Could not check URL, waiting...');
+                await randomDelay(2000, 3000);
+                try {
+                    const newUrl = page.url();
+                    if (!newUrl.includes('two_factor') && !newUrl.includes('challenge')) {
+                        logger.info('[WARMING:2FA] ✅ 2FA succeeded after exception!');
+                        return true;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            // Retry on exception
+            if (retryCount < MAX_2FA_RETRIES - 1) {
+                logger.info(`[WARMING:2FA] 🔄 Retrying after exception (attempt ${retryCount + 2}/${MAX_2FA_RETRIES})...`);
+                await randomDelay(5000, 8000);
+                return await this.handle2FA(page, account, retryCount + 1);
+            }
+
             return false;
         }
     }
