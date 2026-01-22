@@ -181,7 +181,7 @@ class WarmingWorker {
 
             await usernameInput.fill(account.username);
             logger.info('[WARMING] Step 3: ✅ Username filled');
-            await randomDelay(500, 1000);
+            await randomDelay(1000, 2500); // More human-like delay
 
             // Step 4: Fill password - try multiple selectors
             logger.info('[WARMING] Step 4: Filling password...');
@@ -213,7 +213,7 @@ class WarmingWorker {
                 return false;
             }
 
-            await randomDelay(500, 1000);
+            await randomDelay(1500, 3000); // Longer delay after password (more human)
 
             // Step 5: Click login button - try multiple selectors
             logger.info('[WARMING] Step 5: Clicking login button...');
@@ -267,7 +267,7 @@ class WarmingWorker {
 
             // Wait for response
             logger.info('[WARMING] Step 5: Waiting for response...');
-            await randomDelay(6000, 10000);
+            await randomDelay(12000, 15000);
 
             let currentUrl = page.url();
             logger.info(`[WARMING] Step 6: Current URL after login: ${currentUrl}`);
@@ -330,6 +330,32 @@ class WarmingWorker {
                         logger.error('[WARMING] ❌ Suspicious activity detected');
                     } else {
                         logger.error('[WARMING] ❌ Still on login page - unknown error');
+
+                        // Enhanced debugging
+                        try {
+                            // Check for hidden error messages
+                            const errorMessages = await page.$$eval('[role="alert"], .error, [data-testid*="error"]', els =>
+                                els.map(el => el.textContent?.trim()).filter(t => t)
+                            );
+                            if (errorMessages.length > 0) {
+                                logger.error(`[WARMING] 🔍 Error messages found: ${JSON.stringify(errorMessages)}`);
+                            }
+
+                            // Check what's actually visible
+                            const visibleButtons = await page.$$eval('button:visible, div[role="button"]:visible', els =>
+                                els.map(el => el.textContent?.trim() || '').slice(0, 10)
+                            );
+                            logger.debug(`[WARMING] 🔍 Visible buttons: ${JSON.stringify(visibleButtons)}`);
+
+                            // Take screenshot for debug
+                            const timestamp = Date.now();
+                            const screenshotPath = `/tmp/warming-login-fail-${timestamp}.png`;
+                            await page.screenshot({ path: screenshotPath });
+                            logger.error(`[WARMING] 📸 Screenshot saved: ${screenshotPath}`);
+                        } catch (debugErr) {
+                            logger.debug(`[WARMING] Debug capture error: ${debugErr.message}`);
+                        }
+
                         logger.debug(`[WARMING] Page text: ${pageText.substring(0, 500)}`);
                     }
                     await page.close();
