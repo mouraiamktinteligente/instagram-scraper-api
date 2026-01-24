@@ -329,6 +329,55 @@ class WarmingWorker {
                     } else if (pageText.includes('suspeita') || pageText.includes('suspicious')) {
                         logger.error('[WARMING] ❌ Suspicious activity detected');
                     } else {
+                        // ⭐ FIX: Detect "stuck" state and retry before failing
+                        if (currentUrl.includes('/accounts/login/#') || currentUrl === 'https://www.instagram.com/accounts/login/') {
+                            logger.warn('[WARMING] 🔄 Detected stuck state on login page, attempting retry...');
+
+                            // Try clicking login button again
+                            try {
+                                const retryLoginBtn = await page.$('button[type="submit"], div[role="button"]:has-text("Entrar"), div[role="button"]:has-text("Log in")');
+                                if (retryLoginBtn && await retryLoginBtn.isVisible()) {
+                                    await retryLoginBtn.click({ force: true });
+                                    logger.info('[WARMING] 🔄 Retry: Clicked login button again');
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // Press Enter as fallback
+                            await page.keyboard.press('Enter');
+                            logger.info('[WARMING] 🔄 Retry: Pressed Enter key');
+
+                            // Wait for response
+                            await randomDelay(8000, 10000);
+
+                            // Check URL again
+                            const retryUrl = page.url();
+                            logger.info(`[WARMING] 🔄 Retry: URL after second attempt: ${retryUrl}`);
+
+                            // If still on login, check for 2FA content again
+                            if (retryUrl.includes('/accounts/login')) {
+                                const retryPageText = await page.evaluate(() => document.body?.innerText || '');
+                                const is2FAByRetry = retryPageText.includes('código') || retryPageText.includes('code') ||
+                                    retryPageText.includes('6-digit') || retryPageText.includes('6 dígitos');
+
+                                if (is2FAByRetry && account.totp_secret) {
+                                    logger.info('[WARMING] 🔐 2FA detected on retry, handling...');
+                                    const success = await this.handle2FA(page, account);
+                                    if (success) {
+                                        // Successfully handled 2FA on retry
+                                        currentUrl = page.url();
+                                        // Continue to post-login popups below
+                                        await page.close();
+                                        return true;
+                                    }
+                                }
+                            } else if (!retryUrl.includes('/accounts/')) {
+                                // Success! URL changed to non-login page
+                                logger.info('[WARMING] ✅ Retry successful, login completed');
+                                currentUrl = retryUrl;
+                                // Continue to post-login popups
+                            }
+                        }
+
                         logger.error('[WARMING] ❌ Still on login page - unknown error');
 
                         // Enhanced debugging
@@ -646,15 +695,20 @@ class WarmingWorker {
             // Wait before submitting
             await randomDelay(800, 1200);
 
-            // ⭐ Submit button with 7 selectors
+            // ⭐ Submit button with extended selectors (12 total)
             const submitSelectors = [
                 'button[type="submit"]',
                 'button:has-text("Confirmar")',
                 'button:has-text("Confirm")',
                 'button:has-text("Verificar")',
                 'button:has-text("Verify")',
+                'button:has-text("Enviar")',
+                'button:has-text("Submit")',
+                'button:has-text("Avançar")',
+                'button:has-text("Next")',
                 'div[role="button"]:has-text("Confirmar")',
                 'div[role="button"]:has-text("Confirm")',
+                'form button',
             ];
 
             let submitBtn = null;
@@ -794,10 +848,20 @@ class WarmingWorker {
             const stillOnChallenge = urlAfterSubmit.includes('two_factor') ||
                 urlAfterSubmit.includes('challenge');
 
-            if (isSuccess || !stillOnChallenge) {
+            // ⭐ FIX: Also check if we're still on the login page (false positive fix)
+            const stillOnLogin = urlAfterSubmit.includes('/accounts/login');
+
+            // Success ONLY if: (explicit success indicator) OR (not on challenge AND not on login)
+            if (isSuccess || (!stillOnChallenge && !stillOnLogin)) {
                 logger.info('[WARMING:2FA] ✅ Successfully passed 2FA challenge!');
                 logger.info(`[WARMING:2FA] New URL: ${urlAfterSubmit}`);
                 return true;
+            }
+
+            // ⭐ FIX: If still on login page after 2FA, this is a failure
+            if (stillOnLogin) {
+                logger.error('[WARMING:2FA] ❌ Still on login page after 2FA - code may have been rejected silently');
+                return false;
             }
 
             // ⭐ RETRY with new code
