@@ -8,6 +8,8 @@ const { createClient } = require('@supabase/supabase-js');
 const speakeasy = require('speakeasy');
 const config = require('../config');
 const logger = require('../utils/logger');
+// Initialize Supabase client
+const supabase = createClient(config.supabase.url, config.supabase.key);
 const warmingPool = require('../services/warmingPool.service');
 const {
     WarmingBehaviorService,
@@ -39,6 +41,46 @@ class WarmingWorker {
     constructor() {
         this.isRunning = false;
         this.currentAccount = null;
+        this.supabase = supabase;
+    }
+
+    /**
+     * Upload debug screenshot to Supabase Storage
+     * @param {Page} page 
+     * @param {string} stepName 
+     * @returns {Promise<string|null>} Public URL or null
+     */
+    async uploadDebugScreenshot(page, stepName) {
+        try {
+            const timestamp = Date.now();
+            const screenshotBuffer = await page.screenshot({ fullPage: false });
+
+            // Generate filename with step and timestamp
+            const fileName = `debug/warming/${stepName}-${timestamp}.png`;
+
+            const { data: uploadData, error: uploadError } = await this.supabase.storage
+                .from('screenshot')
+                .upload(fileName, screenshotBuffer, {
+                    contentType: 'image/png',
+                    upsert: true
+                });
+
+            if (uploadError) {
+                logger.warn(`[WARMING:DEBUG] Screenshot upload error: ${uploadError.message}`);
+                return null;
+            }
+
+            // Get public URL
+            const { data: urlData } = this.supabase.storage
+                .from('screenshot')
+                .getPublicUrl(fileName);
+
+            logger.info(`[WARMING:DEBUG] 📸 Screenshot [${stepName}]: ${urlData.publicUrl}`);
+            return urlData.publicUrl;
+        } catch (error) {
+            logger.warn(`[WARMING:DEBUG] Screenshot capture failed: ${error.message}`);
+            return null;
+        }
     }
 
     /**
@@ -175,6 +217,7 @@ class WarmingWorker {
 
             if (!usernameInput) {
                 logger.error('[WARMING] ❌ Could not find username input field!');
+                await this.uploadDebugScreenshot(page, 'error-no-username');
                 await page.close();
                 return false;
             }
@@ -209,6 +252,7 @@ class WarmingWorker {
 
             if (!passwordFilled) {
                 logger.error('[WARMING] ❌ Could not find password field');
+                await this.uploadDebugScreenshot(page, 'error-no-password');
                 await page.close();
                 return false;
             }
@@ -277,6 +321,7 @@ class WarmingWorker {
             if (errorMessage) {
                 const errorText = await errorMessage.textContent();
                 logger.error(`[WARMING] ❌ Error message: ${errorText}`);
+                await this.uploadDebugScreenshot(page, 'login-error-msg');
                 await page.close();
                 return false;
             }
@@ -295,6 +340,7 @@ class WarmingWorker {
                     logger.info(`[WARMING] Updated URL after 2FA: ${currentUrl}`);
                 } else {
                     logger.error('[WARMING] ❌ 2FA required but no TOTP secret configured');
+                    await this.uploadDebugScreenshot(page, '2fa-missing-secret');
                     await page.close();
                     return false;
                 }
@@ -363,52 +409,26 @@ class WarmingWorker {
                                     logger.info('[WARMING] 🔐 2FA detected on retry, handling...');
                                     const success = await this.handle2FA(page, account);
                                     if (success) {
-                                        // Successfully handled 2FA on retry
                                         currentUrl = page.url();
-                                        // Continue to post-login popups below
+                                    } else {
                                         await page.close();
-                                        return true;
+                                        return false;
                                     }
                                 }
                             } else if (!retryUrl.includes('/accounts/')) {
                                 // Success! URL changed to non-login page
                                 logger.info('[WARMING] ✅ Retry successful, login completed');
                                 currentUrl = retryUrl;
-                                // Continue to post-login popups
                             }
                         }
 
-                        logger.error('[WARMING] ❌ Still on login page - unknown error');
-
-                        // Enhanced debugging
-                        try {
-                            // Check for hidden error messages
-                            const errorMessages = await page.$$eval('[role="alert"], .error, [data-testid*="error"]', els =>
-                                els.map(el => el.textContent?.trim()).filter(t => t)
-                            );
-                            if (errorMessages.length > 0) {
-                                logger.error(`[WARMING] 🔍 Error messages found: ${JSON.stringify(errorMessages)}`);
-                            }
-
-                            // Check what's actually visible
-                            const visibleButtons = await page.$$eval('button:visible, div[role="button"]:visible', els =>
-                                els.map(el => el.textContent?.trim() || '').slice(0, 10)
-                            );
-                            logger.debug(`[WARMING] 🔍 Visible buttons: ${JSON.stringify(visibleButtons)}`);
-
-                            // Take screenshot for debug
-                            const timestamp = Date.now();
-                            const screenshotPath = `/tmp/warming-login-fail-${timestamp}.png`;
-                            await page.screenshot({ path: screenshotPath });
-                            logger.error(`[WARMING] 📸 Screenshot saved: ${screenshotPath}`);
-                        } catch (debugErr) {
-                            logger.debug(`[WARMING] Debug capture error: ${debugErr.message}`);
+                        if (currentUrl.includes('/accounts/login')) {
+                            logger.error('[WARMING] ❌ Still on login page - unknown error');
+                            await this.uploadDebugScreenshot(page, 'login-stuck-fail');
+                            await page.close();
+                            return false;
                         }
-
-                        logger.debug(`[WARMING] Page text: ${pageText.substring(0, 500)}`);
                     }
-                    await page.close();
-                    return false;
                 }
             }
 
@@ -428,6 +448,7 @@ class WarmingWorker {
             } else {
                 logger.error(`[WARMING] ❌ Login verification failed for ${account.username}`);
                 logger.error(`[WARMING] Final URL: ${page.url()}`);
+                await this.uploadDebugScreenshot(page, 'login-verify-failed');
             }
 
             await page.close();
@@ -438,6 +459,7 @@ class WarmingWorker {
             try {
                 const url = page.url();
                 logger.error(`[WARMING] URL at error: ${url}`);
+                await this.uploadDebugScreenshot(page, 'login-exception');
             } catch (e) { /* ignore */ }
             try { await page.close(); } catch (e) { /* ignore */ }
             return false;
@@ -499,7 +521,6 @@ class WarmingWorker {
                         const isVisible = await btn.isVisible();
                         if (isVisible) {
                             const text = await btn.textContent();
-                            logger.info(`[WARMING] Found dialog button: "${text}"`);
                             if (text && (text.toLowerCase().includes('allow') ||
                                 text.toLowerCase().includes('accept') ||
                                 text.toLowerCase().includes('permitir') ||
@@ -663,10 +684,7 @@ class WarmingWorker {
 
             if (!codeInput) {
                 logger.error('[WARMING:2FA] ❌ Could not find 2FA code input field');
-                const inputs = await page.$$eval('input', inputs =>
-                    inputs.map(i => `${i.name || i.type || 'unknown'}[${i.placeholder || ''}]`)
-                );
-                logger.error(`[WARMING:2FA] Available inputs: ${inputs.join(', ')}`);
+                await this.uploadDebugScreenshot(page, '2fa-error-no-input');
                 return false;
             }
 
@@ -806,6 +824,7 @@ class WarmingWorker {
 
             if (errorMessages.length > 0) {
                 logger.error(`[WARMING:2FA] ❌ Error messages detected: ${errorMessages.join(' | ')}`);
+                await this.uploadDebugScreenshot(page, '2fa-error-messages');
             }
 
             // ⭐ Check for BAD states (suspended, banned, checkpoint)
@@ -821,6 +840,7 @@ class WarmingWorker {
 
             if (isInBadState) {
                 logger.error(`[WARMING:2FA] ❌ Account is in a bad state: ${urlAfterSubmit}`);
+                await this.uploadDebugScreenshot(page, '2fa-bad-state');
 
                 if (urlAfterSubmit.includes('suspended')) {
                     logger.error('[WARMING:2FA] ❌ Account is SUSPENDED - requires human verification');
@@ -861,6 +881,7 @@ class WarmingWorker {
             // ⭐ FIX: If still on login page after 2FA, this is a failure
             if (stillOnLogin) {
                 logger.error('[WARMING:2FA] ❌ Still on login page after 2FA - code may have been rejected silently');
+                await this.uploadDebugScreenshot(page, '2fa-rejected');
                 return false;
             }
 
@@ -891,6 +912,7 @@ class WarmingWorker {
 
         } catch (error) {
             logger.error('[WARMING:2FA] ❌ Exception in 2FA handler:', error.message);
+            await this.uploadDebugScreenshot(page, '2fa-exception');
 
             // ⭐ Check if we actually succeeded despite the exception
             try {
@@ -1067,7 +1089,7 @@ class WarmingWorker {
 
             // Launch browser
             browser = await this.launchBrowser(proxy);
-            context = await this.createBrowserContext(browser);
+            context = await this.createBrowserContext(browser, account); // Pass account for cookies
 
             // Login
             const loggedIn = await this.performLogin(context, account);
@@ -1414,8 +1436,8 @@ class WarmingWorker {
             } catch (e) { /* ignore */ }
 
             return { viewed };
-        } catch (e) {
-            return { viewed: 0, error: e.message };
+        } catch (error) {
+            return { viewed: 0, error: error.message };
         }
     }
 
