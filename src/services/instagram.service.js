@@ -2015,36 +2015,61 @@ class InstagramService {
 
         logger.info('[SCRAPE] Navigating to post:', postUrl);
 
-        // STRATEGY 1: First load Instagram feed to initialize session properly
-        logger.info('[SCRAPE] Loading Instagram feed first (ensures proper session)...');
-        try {
-            await page.goto('https://www.instagram.com/', {
-                waitUntil: 'domcontentloaded',
-                timeout: 30000,
-            });
-            await page.waitForTimeout(2000);
-        } catch (e) {
-            logger.warn('[SCRAPE] Feed pre-load failed, continuing directly...');
-        }
+        // === STRATEGY: RENDER VERIFICATION LOOP ===
+        let attempts = 0;
+        const maxAttempts = 2;
+        let success = false;
 
-        // Navigate to post
-        await page.goto(postUrl, {
-            waitUntil: 'domcontentloaded',
-            timeout: config.scraping.pageTimeout,
-        });
+        while (attempts < maxAttempts && !success) {
+            attempts++;
+            logger.info(`[SCRAPE] Navigation attempt ${attempts}/${maxAttempts}...`);
 
-        // Wait for JavaScript to render content
-        logger.info('[SCRAPE] Waiting for post content to render...');
-        try {
-            await page.waitForFunction(() => {
-                return document.querySelector('article') !== null ||
-                    document.querySelector('div[role="dialog"]') !== null ||
-                    document.querySelectorAll('img').length > 2 ||
-                    document.body.innerText.length > 500;
-            }, { timeout: 30000 });
-            logger.info('[SCRAPE] Post content rendered');
-        } catch (e) {
-            logger.warn('[SCRAPE] Timeout waiting for post content, continuing...');
+            try {
+                // Navigate to post
+                await page.goto(postUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: config.scraping.pageTimeout || 45000,
+                });
+
+                // Wait for JavaScript to render content with multiple indicators
+                logger.info('[SCRAPE] Waiting for post content to render (Success Indicators)...');
+                try {
+                    await page.waitForFunction(() => {
+                        const hasArticle = !!document.querySelector('article');
+                        const hasDialog = !!document.querySelector('div[role="dialog"]');
+                        const hasVideo = !!document.querySelector('video');
+                        const hasImg = document.querySelectorAll('img').length > 5;
+                        const hasContent = document.body.innerText.length > 800;
+                        const isNotFound = document.title.toLowerCase().includes('não encontrad') || document.title.toLowerCase().includes('not found');
+
+                        return (hasArticle || hasDialog || hasVideo || hasImg || hasContent) && !isNotFound;
+                    }, { timeout: 35000 });
+
+                    // Verify if it's not a "Page Not Found" or blank page
+                    const isBlank = await page.evaluate(() => {
+                        const title = document.title.toLowerCase();
+                        return title.includes('not found') || title.includes('encontrada') || document.body.innerText.length < 50;
+                    });
+
+                    if (!isBlank) {
+                        success = true;
+                        logger.info('[SCRAPE] ✅ Post content rendered successfully');
+                    } else {
+                        logger.warn('[SCRAPE] ⚠️ Page appears blank or "Not Found", retrying...');
+                    }
+                } catch (e) {
+                    logger.warn(`[SCRAPE] ⚠️ Detection timeout (Attempt ${attempts}): ${e.message}`);
+                }
+
+                if (!success && attempts < maxAttempts) {
+                    logger.info('[SCRAPE] 🔄 Reloading page as fallback...');
+                    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => { });
+                    await page.waitForTimeout(5000);
+                }
+            } catch (err) {
+                logger.error(`[SCRAPE] ❌ Navigation failed (Attempt ${attempts}): ${err.message}`);
+                if (attempts === maxAttempts) throw err;
+            }
         }
 
         // Wait for network to settle
@@ -2054,35 +2079,25 @@ class InstagramService {
         const layoutInfo = await this.detectLayoutType(page);
         logger.info('[LAYOUT] Detected layout:', layoutInfo);
 
-        // If MODAL_POST_VIEW detected, try to convert to FEED_INLINE
-        if (layoutInfo.layoutType === 'MODAL_POST_VIEW') {
-            logger.warn('[LAYOUT] ⚠️ MODAL_POST_VIEW detected - may have limited scroll. Trying workarounds...');
+        this.currentLayoutType = layoutInfo.layoutType;
+        this.layoutInfo = layoutInfo;
 
-            // The modal/post view is still usable, we just need different scroll strategy
-            // Store layout type for later use in scroll functions
-            this.currentLayoutType = 'MODAL_POST_VIEW';
-            this.layoutInfo = layoutInfo;
-        } else {
-            this.currentLayoutType = layoutInfo.layoutType;
-            this.layoutInfo = layoutInfo;
-        }
-
-        // Log current page state
+        // Log final page state
         const pageInfo = await page.evaluate(() => ({
             url: window.location.href,
             title: document.title,
             hasArticle: !!document.querySelector('article'),
             hasDialog: !!document.querySelector('div[role="dialog"]'),
             imgCount: document.querySelectorAll('img').length,
-            textLength: document.body?.innerText?.length || 0
+            textLength: document.body?.innerText?.length || 0,
+            viewport: { w: window.innerWidth, h: window.innerHeight }
         }));
-        logger.info('[SCRAPE] Post page state:', pageInfo);
+        logger.info('[SCRAPE] Final page state:', pageInfo);
 
-        // Simular comportamento humano para evitar detecção
-        await this.humanDelay(1500, 3000);
+        // Human behavior simulation
+        await this.humanDelay(2000, 4000);
         await this.simulateHumanBehavior(page);
-
-        await randomDelay(2000, 4000);
+        await randomDelay(1000, 2000);
     }
 
     /**
@@ -2274,24 +2289,30 @@ class InstagramService {
         let layoutType = 'UNKNOWN';
 
         // HIGH CONFIDENCE MODAL: 2+ indicators OR has dialog
-        if (detection.dialogIndicators >= 2 || detection.hasDialog) {
+        if (detection.hasDialog || detection.dialogIndicators >= 2) {
             layoutType = 'MODAL_POST_VIEW';
             logger.info(`[LAYOUT-DETECT] High confidence MODAL (${detection.dialogIndicators} indicators)`);
         }
         // HIGH CONFIDENCE FEED: No dialog + has article + 0-1 indicators
-        else if (!detection.hasDialog && detection.hasArticle && detection.dialogIndicators <= 1) {
+        else if (!detection.hasDialog && (detection.hasArticle || detection.hasLargeVideo) && detection.dialogIndicators <= 1) {
             layoutType = 'FEED_INLINE';
-            logger.info(`[LAYOUT-DETECT] High confidence FEED_INLINE (${detection.dialogIndicators} indicators, hasArticle=true)`);
+            logger.info(`[LAYOUT-DETECT] High confidence FEED_INLINE (${detection.dialogIndicators} indicators)`);
         }
         // MODAL FALLBACK: Has video + comment panel but uncertain indicators
-        else if (detection.hasVideo && detection.hasCommentPanel) {
+        else if (detection.hasVideo && detection.hasCommentPanel && detection.viewport.width > 1000) {
             layoutType = 'MODAL_POST_VIEW';
-            logger.info('[LAYOUT-DETECT] Fallback → MODAL_POST_VIEW (video + commentPanel)');
+            logger.info('[LAYOUT-DETECT] Fallback → MODAL_POST_VIEW (geometry-based)');
         }
         // FEED_INLINE FALLBACK: Has comment indicators and visible comments
-        else if (detection.hasCommentIndicators) {
+        else if (detection.hasCommentIndicators || detection.visibleComments > 0) {
             layoutType = 'FEED_INLINE';
-            logger.info('[LAYOUT-DETECT] Fallback → FEED_INLINE (comment indicators)');
+            logger.info('[LAYOUT-DETECT] Fallback → FEED_INLINE (structural comments)');
+        } else {
+            // New fallback: detect by aspect ratio
+            if (detection.viewport.width > 1200) {
+                layoutType = 'FEED_INLINE';
+                logger.info('[LAYOUT-DETECT] Desktop View Fallback → FEED_INLINE');
+            }
         }
 
         logger.info(`[LAYOUT] 📱 Detected layout: ${layoutType}`);
@@ -2632,183 +2653,63 @@ class InstagramService {
 
     /**
      * Intelligently find and click "View all X comments" button
-     * Uses Playwright's built-in text locators which are more reliable
      * @param {Page} page
      * @returns {Promise<boolean>} Whether comments were expanded
      */
     async expandAllComments(page) {
-        logger.info('[SCRAPE] 🔍 Looking for "View all comments" button...');
-
-        // Text patterns to look for (Playwright getByText)
-        const textPatterns = [
-            // Portuguese - exact patterns
-            /Ver todos os \d+ comentários/i,
-            /Ver \d+ comentários/i,
-            /Ver todos os comentários/i,
-            // English
-            /View all \d+ comments/i,
-            /View \d+ comments/i,
-            /View all comments/i,
-        ];
+        logger.info('[SCRAPE] 🔍 Attempting to expand comments (Advanced Strategy)...');
 
         try {
-            // Strategy 1: Use Playwright's getByText with regex (most reliable)
-            for (const pattern of textPatterns) {
+            // Strategy 0: High-confidence "View all comments" link/button
+            const primarySelectors = [
+                'a[href*="/comments/"]',
+                'span:has-text("ver todos")',
+                'span:has-text("view all")',
+                'button:has-text("mais")',
+                'button:has-text("more")',
+            ];
+
+            for (const selector of primarySelectors) {
                 try {
-                    const locator = page.getByText(pattern);
-                    const count = await locator.count();
-
-                    if (count > 0) {
-                        // Get the first visible one
-                        const element = locator.first();
-                        const isVisible = await element.isVisible().catch(() => false);
-
-                        if (isVisible) {
-                            const text = await element.textContent();
-                            logger.info(`[SCRAPE] ✅ Found expand button: "${text?.trim()}"`);
-
-                            // ⭐ SCROLL to make button visible and centered
-                            await element.scrollIntoViewIfNeeded().catch(() => { });
-                            await randomDelay(500, 1000);
-
-                            // ⭐ WAIT for page to stabilize before clicking
-                            logger.info('[SCRAPE] Waiting for page to stabilize...');
-                            await randomDelay(3000, 4000);
-
-                            // ⭐ MULTI-STRATEGY CLICK with verification
-                            const clickSuccess = await this.robustClick(page, element, text);
-
-                            if (clickSuccess) {
-                                // Wait for modal or new content to load
-                                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
-                                logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
-
-                                // ⭐ VERIFY: Check if comments modal/panel actually opened
-                                await randomDelay(2000, 3000);
-                                const modalOpened = await page.evaluate(() => {
-                                    // Check for visible comment input field (indicates comments section is open)
-                                    const commentInput = document.querySelector('textarea[placeholder*="comentário"], textarea[placeholder*="comment"], input[placeholder*="comentário"]');
-                                    // Check for visible comment list
-                                    const commentList = document.querySelector('ul li span');
-                                    // Check for dialog that might contain comments
-                                    const dialog = document.querySelector('div[role="dialog"]');
-
-                                    return !!(commentInput || commentList || dialog);
-                                });
-
-                                if (!modalOpened) {
-                                    logger.warn('[SCRAPE] ⚠️ Modal may not have opened, trying double-click...');
-                                    // Try clicking again
-                                    await randomDelay(500, 1000);
-                                    await this.robustClick(page, element, text);
-                                    await randomDelay(2000, 3000);
-                                }
-
-                                return true;
-                            }
+                    const el = await page.$(selector);
+                    if (el && await el.isVisible()) {
+                        logger.info(`[SCRAPE] ✅ Strategy 0: Found primary button with: ${selector}`);
+                        if (await this.robustClick(page, el, 'Primary Expand Button')) {
+                            return true;
                         }
                     }
-                } catch (e) {
-                    // Pattern not found, try next
-                }
+                } catch (e) { /* next */ }
             }
 
-            // Strategy 2: Look for any element containing "comentário" or "comment" count
-            logger.info('[SCRAPE] Pattern matching failed, trying text search...');
+            // Strategy 1: Dynamic Structural Detection (Look for comment count patterns)
+            const structuralSuccess = await page.evaluate(() => {
+                const allElements = Array.from(document.querySelectorAll('span, div, a, button'));
+                const pattern = /((\d+)\s+(comentário|comment|ver todos|view all))/i;
 
-            const commentLinkInfo = await page.evaluate(() => {
-                // Find all spans and links
-                const elements = document.querySelectorAll('span, a, div[role="button"]');
-
-                for (const el of elements) {
-                    const text = el.innerText?.trim() || '';
-
-                    // Must contain a number and "comentário" or "comment"
-                    const hasNumber = /\d+/.test(text);
-                    const hasComment = /coment[áa]rio|comment/i.test(text);
-                    const hasView = /ver|view/i.test(text);
-
-                    if (hasNumber && hasComment && hasView) {
+                for (const el of allElements) {
+                    if (el.innerText && pattern.test(el.innerText)) {
                         const rect = el.getBoundingClientRect();
-                        if (rect.height > 0 && rect.width > 0) {
-                            return {
-                                found: true,
-                                text: text.substring(0, 100),
-                                x: rect.x + rect.width / 2,
-                                y: rect.y + rect.height / 2
-                            };
+                        if (rect.width > 0 && rect.height > 0) {
+                            el.click();
+                            return true;
                         }
                     }
                 }
-
-                return { found: false };
+                return false;
             });
 
-            if (commentLinkInfo.found) {
-                logger.info(`[SCRAPE] ✅ Found via text search: "${commentLinkInfo.text}"`);
-
-                await page.mouse.click(commentLinkInfo.x, commentLinkInfo.y);
-                await randomDelay(2000, 3000);
-                await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
-
-                logger.info('[SCRAPE] ✅ Clicked expand button, waiting for comments to load...');
+            if (structuralSuccess) {
+                logger.info('[SCRAPE] ✅ Strategy 1: Triggered expansion via structural pattern');
+                await page.waitForTimeout(2000);
                 return true;
             }
 
-            // Strategy 3: Check if comments are already expanded (modal is open)
-            const hasModal = await page.$('div[role="dialog"]');
-            if (hasModal) {
-                logger.info('[SCRAPE] Comments modal already open');
-                return true;
-            }
-
-            // DIAGNOSTIC: Get all text on page that contains "comentário" or "comment"
-            const diagnosticInfo = await page.evaluate(() => {
-                const results = [];
-                const elements = document.querySelectorAll('span, a, div[role="button"], button');
-
-                for (const el of elements) {
-                    const text = el.innerText?.trim() || '';
-                    if (text.toLowerCase().includes('coment') || text.toLowerCase().includes('comment')) {
-                        const rect = el.getBoundingClientRect();
-                        results.push({
-                            text: text.substring(0, 80),
-                            tag: el.tagName,
-                            visible: rect.height > 0 && rect.width > 0,
-                            className: el.className?.substring(0, 50) || ''
-                        });
-                    }
-                }
-
-                return {
-                    foundElements: results.slice(0, 10),
-                    pageTitle: document.title,
-                    pageUrl: location.href
-                };
-            });
-
-            // Log detailed diagnostic for debugging
-            logger.error('[SCRAPE] ❌ FAILED TO FIND "View all comments" button');
-            logger.error('[SCRAPE] 📋 DIAGNOSTIC INFO:');
-            logger.error(`[SCRAPE] Page: ${diagnosticInfo.pageUrl}`);
-            logger.error(`[SCRAPE] Title: ${diagnosticInfo.pageTitle}`);
-            logger.error(`[SCRAPE] Elements containing "coment/comment":`);
-
-            if (diagnosticInfo.foundElements.length === 0) {
-                logger.error('[SCRAPE] ⚠️ NO elements found with "comentário" or "comment" text!');
-                logger.error('[SCRAPE] ⚠️ Post may have comments disabled or page structure changed');
-            } else {
-                diagnosticInfo.foundElements.forEach((el, i) => {
-                    logger.error(`[SCRAPE]   ${i + 1}. [${el.tag}] "${el.text}" (visible: ${el.visible})`);
-                });
-            }
-
-            // Strategy 4: AI discovery (Ultimate fallback)
-            logger.info('[SCRAPE] Elements not found by DOM search, trying AI discovery...');
+            // Strategy 2: AI discovery (Fallback)
+            logger.info('[SCRAPE] 🤖 Normal search failed, requesting AI assistance...');
             const aiDiscovery = await aiSelectorFallback.findElement(page, 'view_more_comments', 'post_page');
 
             if (aiDiscovery.element) {
-                logger.info(`[SCRAPE] ✅ AI discovered expand button: ${aiDiscovery.usedSelector}`);
+                logger.info(`[SCRAPE] ✅ Strategy 2: AI discovered expand button: ${aiDiscovery.usedSelector}`);
                 const clickedByAI = await this.robustClick(page, aiDiscovery.element, 'AI discovered button');
                 if (clickedByAI) {
                     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
@@ -2816,25 +2717,25 @@ class InstagramService {
                 }
             }
 
+            logger.warn('[SCRAPE] ⚠️ All expansion strategies failed');
             return false;
 
         } catch (error) {
-            logger.error('[SCRAPE] Error expanding comments:', error.message);
+            logger.error('[SCRAPE] Error in expandAllComments:', error.message);
             return false;
         }
     }
 
     /**
      * Scroll to load more comments
-     * IMPROVED: Uses GraphQL intercepted array as source of truth (not DOM counting)
      * @param {Page} page
      * @param {number} maxComments - Optional limit
      * @param {Array} commentsArray - Reference to GraphQL intercepted comments
      */
     async scrollForMoreComments(page, maxComments = null, commentsArray = []) {
-        const MAX_SCROLLS = 25; // Increased from 5
-        const MAX_NO_CHANGE = 7; // Stop after 7 iterations with no new GraphQL data
-        const SCROLL_DELAY = 4500; // 4.5 seconds between scrolls
+        const MAX_SCROLLS = 25;
+        const MAX_NO_CHANGE = 7;
+        const SCROLL_DELAY = 4500;
 
         let totalClicks = 0;
         let previousGraphQLCount = commentsArray.length;
@@ -2842,259 +2743,97 @@ class InstagramService {
 
         const hasLimit = maxComments && maxComments > 0;
         logger.info(`[SCROLL] Starting smart scroll for comments`);
-        logger.info(`[SCROLL] Initial GraphQL count: ${previousGraphQLCount}, limit: ${hasLimit ? maxComments : 'unlimited'}, max scrolls: ${MAX_SCROLLS}`);
 
-        // First, diagnose and find the correct scroll container
+        // Find correct scroll container
         const scrollContainer = await this.findScrollContainer(page);
-        logger.info(`[SCROLL] Using container: ${scrollContainer?.name || 'window (fallback)'} (useModal: ${scrollContainer?.useModal || false})`);
+        logger.info(`[SCROLL] Using container: ${scrollContainer?.name || 'window (fallback)'}`);
 
         // Try to open comments modal if not already open
-        const commentsOpened = await this.openCommentsModal(page);
-        if (commentsOpened) {
-            logger.info('[SCROLL] Comments modal/section opened');
-            await randomDelay(2500, 3500);
-        }
-
-        // 📸 DEBUG SCREENSHOT: Capture state before scrolling and upload to Supabase
-        try {
-            const timestamp = Date.now();
-            const screenshotBuffer = await page.screenshot({ fullPage: false });
-
-            // Upload to Supabase Storage
-            const fileName = `debug/before-scroll-${timestamp}.png`;
-            const { data: uploadData, error: uploadError } = await supabase.storage
-                .from('screenshot')
-                .upload(fileName, screenshotBuffer, {
-                    contentType: 'image/png',
-                    upsert: true
-                });
-
-            if (uploadError) {
-                logger.warn(`[DEBUG] Upload error: ${uploadError.message}`);
-            } else {
-                // Get public URL
-                const { data: urlData } = supabase.storage
-                    .from('screenshot')
-                    .getPublicUrl(fileName);
-
-                logger.info(`[DEBUG] 📸 Screenshot uploaded: ${urlData.publicUrl}`);
-            }
-
-            // Also capture DOM info about the dialog
-            const dialogInfo = await page.evaluate(() => {
-                const dialog = document.querySelector('div[role="dialog"]');
-                if (!dialog) return { exists: false };
-
-                const rect = dialog.getBoundingClientRect();
-                const allDivs = dialog.querySelectorAll('div');
-                const scrollableDivs = [];
-
-                for (const div of allDivs) {
-                    const style = window.getComputedStyle(div);
-                    const overflowY = style.overflowY;
-                    const scrollable = div.scrollHeight > div.clientHeight;
-
-                    if (scrollable && div.clientHeight > 50) {
-                        scrollableDivs.push({
-                            overflowY,
-                            clientHeight: div.clientHeight,
-                            scrollHeight: div.scrollHeight,
-                            scrollTop: div.scrollTop,
-                            className: div.className?.substring(0, 30) || 'no-class'
-                        });
-                    }
-                }
-
-                return {
-                    exists: true,
-                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-                    totalDivs: allDivs.length,
-                    scrollableDivs: scrollableDivs.slice(0, 5), // First 5
-                    innerText: dialog.innerText?.substring(0, 200) || ''
-                };
-            });
-
-            logger.info(`[DEBUG] 🔍 Dialog info: exists=${dialogInfo.exists}`);
-            if (dialogInfo.exists) {
-                logger.info(`[DEBUG] Dialog rect: ${JSON.stringify(dialogInfo.rect)}`);
-                logger.info(`[DEBUG] Total divs: ${dialogInfo.totalDivs}, Scrollable: ${dialogInfo.scrollableDivs.length}`);
-                if (dialogInfo.scrollableDivs.length > 0) {
-                    logger.info(`[DEBUG] Scrollable divs: ${JSON.stringify(dialogInfo.scrollableDivs)}`);
-                }
-                logger.info(`[DEBUG] Dialog text preview: "${dialogInfo.innerText.substring(0, 100)}..."`);
-            }
-        } catch (debugError) {
-            logger.warn(`[DEBUG] Screenshot error: ${debugError.message}`);
-        }
+        await this.openCommentsModal(page);
 
         for (let i = 0; i < MAX_SCROLLS; i++) {
             const currentGraphQLCount = commentsArray.length;
             const timestamp = new Date().toISOString().substr(11, 8);
 
-            logger.info(`[SCROLL] [${timestamp}] Iteration ${i + 1}/${MAX_SCROLLS}`);
-            logger.info(`[SCROLL] GraphQL has ${currentGraphQLCount} comments`);
+            logger.info(`[SCROLL] [${timestamp}] Iteration ${i + 1}/${MAX_SCROLLS} (GraphQL: ${currentGraphQLCount})`);
 
-            // Check if new comments were loaded via GraphQL
             if (currentGraphQLCount === previousGraphQLCount) {
                 noChangeCount++;
-                logger.debug(`[SCROLL] No new GraphQL data (${noChangeCount}/${MAX_NO_CHANGE})`);
-
                 if (noChangeCount >= MAX_NO_CHANGE) {
                     logger.info(`[SCROLL] ✅ Complete! No new data after ${noChangeCount} attempts`);
                     break;
                 }
             } else {
-                const newComments = currentGraphQLCount - previousGraphQLCount;
-                logger.info(`[SCROLL] ✅ +${newComments} new comments! (${previousGraphQLCount} → ${currentGraphQLCount})`);
-                noChangeCount = 0; // Reset counter
+                noChangeCount = 0;
             }
             previousGraphQLCount = currentGraphQLCount;
 
-            // Check if we've reached the target
             if (hasLimit && currentGraphQLCount >= maxComments) {
                 logger.info(`[SCROLL] ✅ Reached target! ${currentGraphQLCount}/${maxComments}`);
                 break;
             }
 
-            // STEP 1: Click "View replies" / "Load more" buttons
+            // Click "Load more"
             const clicked = await this.clickLoadMoreButtons(page);
-            if (clicked) {
-                totalClicks++;
-                await randomDelay(2000, 3500);
-            }
+            if (clicked) totalClicks++;
 
-            // STEP 2: Scroll in the correct container (using intelligent detection)
-            // First, try to scroll via JavaScript
-            const jsScrolled = await page.evaluate((containerInfo) => {
-                // If modal is detected, find the scrollable element inside
-                if (containerInfo && containerInfo.useModal) {
-                    const dialog = document.querySelector('div[role="dialog"]');
-                    if (dialog) {
-                        // Find the scrollable div inside the modal
-                        const allDivs = dialog.querySelectorAll('div');
-                        for (const div of allDivs) {
-                            const style = window.getComputedStyle(div);
-                            if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
-                                div.scrollHeight > div.clientHeight + 20) {
-                                console.log('[SCROLL] Scrolling modal inner div');
-                                div.scrollTop = div.scrollHeight;
-                                return true;
-                            }
-                        }
-                        // Fallback: scroll the dialog itself
-                        console.log('[SCROLL] Scrolling modal dialog');
-                        dialog.scrollTop = dialog.scrollHeight;
-                        return true;
-                    }
-                }
+            // Perform scroll
+            await this.performScroll(page, scrollContainer);
 
-                // Try selector if provided
-                if (containerInfo && containerInfo.selector) {
-                    const container = document.querySelector(containerInfo.selector);
-                    if (container) {
-                        console.log('[SCROLL] Scrolling by selector:', containerInfo.selector);
-                        container.scrollTop = container.scrollHeight;
-                        return true;
-                    }
-                }
-
-                return false;
-            }, scrollContainer);
-
-            // STEP 3: If JS scroll didn't work, use mouse.wheel
-            if (!jsScrolled) {
-                // First, check if we have feed panel coordinates from findScrollContainer
-                if (scrollContainer && scrollContainer.useFeedPanel && scrollContainer.panelCoords) {
-                    // Use coordinates from the detected inline comments panel
-                    await page.mouse.move(scrollContainer.panelCoords.x, scrollContainer.panelCoords.y);
-                    await page.mouse.wheel(0, 500); // Scroll down 500px
-                    logger.info(`[SCROLL] 🖱️ Mouse wheel on feed panel at (${Math.round(scrollContainer.panelCoords.x)}, ${Math.round(scrollContainer.panelCoords.y)})`);
-                } else {
-                    // Find dialog and use mouse wheel directly
-                    const dialogBox = await page.evaluate(() => {
-                        const dialog = document.querySelector('div[role="dialog"]');
-                        if (dialog) {
-                            const rect = dialog.getBoundingClientRect();
-                            return {
-                                x: rect.x + rect.width / 2,
-                                y: rect.y + rect.height / 2,
-                                found: true,
-                                type: 'dialog'
-                            };
-                        }
-
-                        // Try to find comments area on the right side of the post
-                        const article = document.querySelector('article');
-                        if (article) {
-                            // Comments are usually in the right half of the article
-                            const rect = article.getBoundingClientRect();
-                            // Use right side of article (where comments typically are)
-                            return {
-                                x: rect.x + rect.width * 0.75, // 75% from left (right side)
-                                y: rect.y + rect.height / 2,
-                                found: true,
-                                type: 'article-right'
-                            };
-                        }
-
-                        return { found: false };
-                    });
-
-                    if (dialogBox.found) {
-                        // Move mouse to center of dialog/article and scroll
-                        await page.mouse.move(dialogBox.x, dialogBox.y);
-                        await page.mouse.wheel(0, 500); // Scroll down 500px
-                        logger.info(`[SCROLL] 🖱️ Mouse wheel at ${dialogBox.type} (${Math.round(dialogBox.x)}, ${Math.round(dialogBox.y)})`);
-                    } else if (this.currentLayoutType === 'FEED_INLINE') {
-                        // FEED_INLINE: Scroll on the right side of the viewport where comments are
-                        const viewport = page.viewportSize();
-                        const feedScrollX = viewport.width * 0.70; // 70% from left (right side panel)
-                        const feedScrollY = viewport.height * 0.50; // Middle of screen
-                        await page.mouse.move(feedScrollX, feedScrollY);
-                        await page.mouse.wheel(0, 400);
-                        logger.info(`[SCROLL] 🖱️ FEED_INLINE scroll at (${Math.round(feedScrollX)}, ${Math.round(feedScrollY)})`);
-                    } else {
-                        // Last fallback: scroll window
-                        await page.evaluate(() => window.scrollBy(0, 600));
-                        logger.info('[SCROLL] Window scroll fallback');
-                    }
-                }
-            }
-
-            // Wait for API to respond
-            await randomDelay(SCROLL_DELAY, SCROLL_DELAY + 1500);
-
-            // Log progress every 3 iterations
-            if ((i + 1) % 3 === 0) {
-                logger.info(`[SCROLL] Progress: iteration ${i + 1}, GraphQL: ${commentsArray.length}, clicks: ${totalClicks}`);
-            }
+            // Wait for API
+            await randomDelay(SCROLL_DELAY, SCROLL_DELAY + 1000);
         }
 
-        logger.info(`[SCROLL] Complete! Final count: ${commentsArray.length} comments, ${totalClicks} button clicks`);
+        logger.info(`[SCROLL] Complete! Final count: ${commentsArray.length} comments`);
+    }
+
+    /**
+     * Perform the scroll operation based on container info
+     */
+    async performScroll(page, container) {
+        const jsScrolled = await page.evaluate((info) => {
+            if (info && info.useModal) {
+                const dialog = document.querySelector('div[role="dialog"]');
+                if (dialog) {
+                    const scrollable = Array.from(dialog.querySelectorAll('div')).find(div => {
+                        const s = window.getComputedStyle(div);
+                        return (s.overflowY === 'auto' || s.overflowY === 'scroll') && div.scrollHeight > div.clientHeight;
+                    });
+                    if (scrollable) {
+                        scrollable.scrollTop = scrollable.scrollHeight;
+                        return true;
+                    }
+                    dialog.scrollTop = dialog.scrollHeight;
+                    return true;
+                }
+            }
+            if (info && info.selector) {
+                const el = document.querySelector(info.selector);
+                if (el) { el.scrollTop = el.scrollHeight; return true; }
+            }
+            return false;
+        }, container);
+
+        if (!jsScrolled) {
+            if (container && container.panelCoords) {
+                await page.mouse.move(container.panelCoords.x, container.panelCoords.y);
+                await page.mouse.wheel(0, 500);
+            } else {
+                await page.evaluate(() => window.scrollBy(0, 600));
+            }
+        }
     }
 
     /**
      * Perform a robust click on an element using multiple strategies
-     * Strategy 1: element.click()
-     * Strategy 2: JavaScript click
-     * Strategy 3: Mouse click at coordinates
-     * 
-     * @param {Page} page - Playwright page
-     * @param {Locator} element - Element to click
-     * @param {string} text - Text of the button (for logging)
-     * @returns {Promise<boolean>} - Whether click was successful
      */
-    async robustClick(page, element, description = 'element') {
+    async robustClick(page, element, description = 'better_element') {
         let clickCount = 0;
 
-        // Try to scroll it into center first
         try {
-            await element.scrollIntoViewIfNeeded().catch(() => { });
-            await randomDelay(500, 1000);
-
-            // If it's covered by a header or something, scroll a bit more
+            await element.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => { });
             await page.evaluate((el) => {
-                el.scrollIntoView({ block: 'center', inline: 'center' });
+                if (el) el.scrollIntoView({ block: 'center', inline: 'center' });
             }, element);
             await randomDelay(500, 1000);
         } catch (e) { /* ignore */ }
@@ -3103,346 +2842,91 @@ class InstagramService {
         try {
             await element.click({ timeout: 5000 });
             clickCount++;
-            logger.info('[SCRAPE] Strategy 1 (element.click): ✅ executed');
-        } catch (e) {
-            logger.warn('[SCRAPE] Strategy 1 (element.click): ❌ failed -', e.message);
-        }
+            return true;
+        } catch (e) { /* next */ }
 
-        await page.waitForTimeout(500);
-
-        // Strategy 2: JavaScript click via element handle
+        // Strategy 2: JS Click
         try {
-            const handle = await element.elementHandle();
-            if (handle) {
-                await handle.evaluate(el => el.click());
-                clickCount++;
-                logger.info('[SCRAPE] Strategy 2 (JS click): ✅ executed');
-            }
-        } catch (e) {
-            logger.warn('[SCRAPE] Strategy 2 (JS click): ❌ failed -', e.message);
-        }
+            await page.evaluate((el) => { if (el) el.click(); }, element);
+            clickCount++;
+            return true;
+        } catch (e) { /* next */ }
 
-        await page.waitForTimeout(500);
-
-        // Strategy 3: Mouse click at element coordinates
+        // Strategy 3: Mouse wheel and coords
         try {
             const box = await element.boundingBox();
             if (box) {
-                const x = box.x + box.width / 2;
-                const y = box.y + box.height / 2;
-                await page.mouse.click(x, y);
+                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
                 clickCount++;
-                logger.info(`[SCRAPE] Strategy 3 (mouse click at ${Math.round(x)},${Math.round(y)}): ✅ executed`);
+                return true;
             }
-        } catch (e) {
-            logger.warn('[SCRAPE] Strategy 3 (mouse click): ❌ failed -', e.message);
-        }
+        } catch (e) { /* next */ }
 
-        logger.info(`[SCRAPE] Click attempts: ${clickCount}/3 strategies executed`);
-
-        // Success if at least one click executed
         return clickCount > 0;
     }
 
     /**
-     * Find the best scrollable container for comments
-     * Uses computed style to detect overflow properties
-     * Returns CSS selector or null
+     * Find best scrollable container
      */
     async findScrollContainer(page) {
         try {
             const result = await page.evaluate(() => {
-                // First, check if there's a dialog/modal open
                 const dialog = document.querySelector('div[role="dialog"]');
+                if (dialog) return { name: 'modal', useModal: true, scrollable: true };
 
-                if (dialog) {
-                    console.log('[CONTAINER] Modal detected, searching within modal...');
-
-                    // Find all divs inside the modal and check their computed overflow
-                    const allDivs = dialog.querySelectorAll('div');
-
-                    for (const div of allDivs) {
-                        const style = window.getComputedStyle(div);
-                        const overflowY = style.overflowY;
-                        const hasOverflow = overflowY === 'auto' || overflowY === 'scroll';
-                        const canScroll = div.scrollHeight > div.clientHeight + 20;
-                        const hasHeight = div.clientHeight > 100;
-
-                        if (hasOverflow && canScroll && hasHeight) {
-                            // Generate a unique selector for this element
-                            const tagName = div.tagName.toLowerCase();
-                            const classList = Array.from(div.classList).join('.');
-
-                            console.log(`[CONTAINER] ✅ Found scrollable in modal: overflow=${overflowY}, height=${div.clientHeight}, scrollHeight=${div.scrollHeight}`);
-
-                            return {
-                                selector: 'div[role="dialog"]',
-                                name: 'modal-scrollable',
-                                scrollable: true,
-                                details: {
-                                    overflowY,
-                                    clientHeight: div.clientHeight,
-                                    scrollHeight: div.scrollHeight,
-                                    classList: classList.substring(0, 50)
-                                },
-                                // Store the element index for later use
-                                useModal: true
-                            };
-                        }
-                    }
-
-                    // If no scrollable div found, just use the dialog itself
-                    console.log('[CONTAINER] No scrollable div in modal, using dialog');
-                    return {
-                        selector: 'div[role="dialog"]',
-                        name: 'modal-fallback',
-                        scrollable: true,
-                        useModal: true
-                    };
-                }
-
-                // NEW: Check for feed-style view (comments panel on the right side of post)
-                // This is when you navigate directly to /p/XXX/ and comments are inline
                 const article = document.querySelector('article');
                 if (article) {
-                    console.log('[CONTAINER] Article found, checking for inline comments panel...');
-
-                    // In feed view, comments are in a scrollable section to the right
-                    // Look for any div that contains comments and is scrollable
-                    const allDivs = article.querySelectorAll('div');
-
-                    for (const div of allDivs) {
-                        const style = window.getComputedStyle(div);
-                        const overflowY = style.overflowY;
-                        const hasOverflow = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'hidden';
-                        const canScroll = div.scrollHeight > div.clientHeight + 50;
-                        const hasHeight = div.clientHeight > 200;
-
-                        // Check if this div contains comment-like content
-                        const containsCommentText = div.innerText?.includes('@') ||
-                            div.innerText?.includes('Responder') ||
-                            div.innerText?.includes('Reply');
-
-                        if (hasOverflow && canScroll && hasHeight && containsCommentText) {
-                            const rect = div.getBoundingClientRect();
-                            console.log(`[CONTAINER] ✅ Found inline comments panel: overflow=${overflowY}, height=${div.clientHeight}, scrollHeight=${div.scrollHeight}`);
-
-                            return {
-                                selector: null, // Will use coordinates instead
-                                name: 'inline-comments-panel',
-                                scrollable: true,
-                                useModal: false,
-                                useFeedPanel: true,
-                                panelCoords: {
-                                    x: rect.x + rect.width / 2,
-                                    y: rect.y + rect.height / 2
-                                },
-                                details: {
-                                    overflowY,
-                                    clientHeight: div.clientHeight,
-                                    scrollHeight: div.scrollHeight
-                                }
-                            };
-                        }
-                    }
-
-                    // Try to find comments section by looking for specific patterns
-                    const sections = article.querySelectorAll('section');
-                    for (const section of sections) {
-                        const canScroll = section.scrollHeight > section.clientHeight + 50;
-                        if (canScroll && section.clientHeight > 200) {
-                            const rect = section.getBoundingClientRect();
-                            console.log(`[CONTAINER] ✅ Found article section for comments`);
-                            return {
-                                selector: 'article section', // Use selector instead of null
-                                name: 'article-section',
-                                scrollable: true,
-                                useModal: false,
-                                useFeedPanel: true,
-                                panelCoords: {
-                                    x: rect.x + rect.width / 2,
-                                    y: rect.y + rect.height / 2
-                                },
-                                details: {
-                                    clientHeight: section.clientHeight,
-                                    scrollHeight: section.scrollHeight
-                                }
-                            };
-                        }
-                    }
-
-                    // Look for aria-label="Comments" or "Comentários"
-                    const commentsAria = article.querySelector('[aria-label*="Coment"], [aria-label*="Comment"]');
-                    if (commentsAria) {
-                        const style = window.getComputedStyle(commentsAria);
-                        if (style.overflowY === 'auto' || style.overflowY === 'scroll' || commentsAria.scrollHeight > commentsAria.clientHeight + 20) {
-                            const rect = commentsAria.getBoundingClientRect();
-                            console.log(`[CONTAINER] ✅ Found comments panel by aria-label`);
-                            return {
-                                selector: '[aria-label*="Coment"], [aria-label*="Comment"]',
-                                name: 'aria-comments-panel',
-                                scrollable: true,
-                                useModal: false,
-                                useFeedPanel: true,
-                                panelCoords: {
-                                    x: rect.x + rect.width / 2,
-                                    y: rect.y + rect.height / 2
-                                }
-                            };
-                        }
+                    const scrollable = Array.from(article.querySelectorAll('div, section')).find(el => {
+                        const s = window.getComputedStyle(el);
+                        return (s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 50;
+                    });
+                    if (scrollable) {
+                        const r = scrollable.getBoundingClientRect();
+                        return { name: 'inline', scrollable: true, panelCoords: { x: r.x + r.width / 2, y: r.y + r.height / 2 } };
                     }
                 }
-
-                // Legacy: check article/page containers
-                const candidates = [
-                    'article section:last-child',
-                    'article > div > div:nth-child(2)',
-                    '[style*="overflow-y: auto"]',
-                    '[style*="overflow-y: scroll"]',
-                    '[style*="overflow: auto"]'
-                ];
-
-                for (const sel of candidates) {
-                    const el = document.querySelector(sel);
-                    if (el && el.scrollHeight > el.clientHeight + 50) {
-                        console.log(`[CONTAINER] Found article container: ${sel}`);
-                        return {
-                            selector: sel,
-                            name: 'article-container',
-                            scrollable: true,
-                            useModal: false
-                        };
-                    }
-                }
-
-                // FALLBACK: If article exists but no scrollable container found,
-                // still return article coords for mouse.wheel scroll
-                if (article) {
-                    const rect = article.getBoundingClientRect();
-                    console.log('[CONTAINER] No scrollable found, using article fallback');
-                    return {
-                        selector: null,
-                        name: 'article-fallback',
-                        scrollable: false, // No JS scroll, but we can use mouse.wheel
-                        useModal: false,
-                        useFeedPanel: true,
-                        panelCoords: {
-                            x: rect.x + rect.width * 0.75, // Right side (comments)
-                            y: rect.y + rect.height * 0.5
-                        }
-                    };
-                }
-
-                return { selector: null, name: 'none', scrollable: false, useModal: false };
+                return { name: 'window', scrollable: false };
             });
-
-            if (result.scrollable) {
-                logger.info(`[SCROLL] ✅ Found container: ${result.name} (${result.selector})`);
-                if (result.details) {
-                    logger.info(`[SCROLL] Container details: overflow=${result.details.overflowY}, height=${result.details.clientHeight}px, scroll=${result.details.scrollHeight}px`);
-                }
-            } else {
-                logger.warn('[SCROLL] ⚠️ No scrollable container found');
-            }
-
             return result;
-
-        } catch (error) {
-            logger.error('[SCROLL] Error finding scroll container:', error.message);
-            return { selector: null, name: 'error', scrollable: false, useModal: false };
+        } catch (e) {
+            return { name: 'error', scrollable: false };
         }
     }
 
     /**
-     * Try to open the comments modal (clicking on comments link)
-     * Instagram often shows comments in a modal overlay
+     * Try to open comments modal
      */
     async openCommentsModal(page) {
         try {
-            // Check if modal is already open
-            const hasModal = await page.$('div[role="dialog"]');
-            if (hasModal) {
-                return true;
-            }
-
-            // Try to click on elements that open comments
-            const openSelectors = [
-                // Link to comments (speech bubble icon or text)
-                'a[href*="/comments/"]',
-                'svg[aria-label*="Comment"]',
-                'svg[aria-label*="Comentário"]',
-                // Comment count click area
-                'span:has-text("comentário")',
-                'span:has-text("comment")',
-            ];
-
-            for (const selector of openSelectors) {
-                try {
-                    const el = await page.$(selector);
-                    if (el && await el.isVisible()) {
-                        await el.click();
-                        await randomDelay(2000, 3000);
-
-                        // Check if modal opened
-                        const modalOpened = await page.$('div[role="dialog"]');
-                        if (modalOpened) {
-                            return true;
-                        }
-                    }
-                } catch (e) {
-                    // Try next
+            if (await page.$('div[role="dialog"]')) return true;
+            const selectors = ['a[href*="/comments/"]', 'svg[aria-label*="Coment"]', 'span:has-text("comentário")'];
+            for (const sel of selectors) {
+                const el = await page.$(sel);
+                if (el && await el.isVisible()) {
+                    await el.click();
+                    await randomDelay(2000, 3000);
+                    if (await page.$('div[role="dialog"]')) return true;
                 }
             }
-
             return false;
-        } catch (error) {
-            logger.debug('[SCRAPE] Could not open comments modal:', error.message);
-            return false;
-        }
+        } catch (e) { return false; }
     }
 
     /**
-     * Click on "Load more comments" or "View replies" buttons
-     * Returns true if any button was clicked
+     * Click Load More buttons
      */
     async clickLoadMoreButtons(page) {
-        const buttonPatterns = [
-            // Portuguese
-            { text: /ver mais respostas/i, priority: 1 },
-            { text: /ver respostas/i, priority: 1 },
-            { text: /carregar mais/i, priority: 2 },
-            { text: /mais comentários/i, priority: 2 },
-            // English
-            { text: /view.*replies/i, priority: 1 },
-            { text: /load more/i, priority: 2 },
-            { text: /more comments/i, priority: 2 },
-            // Generic expand
-            { text: /^\+$/, priority: 3 },
-            { text: /ver mais/i, priority: 3 },
-        ];
-
+        const patterns = [/ver mais respostas/i, /ver respostas/i, /carregar mais/i, /load more/i, /view.*replies/i];
         try {
-            for (const pattern of buttonPatterns.sort((a, b) => a.priority - b.priority)) {
-                const locator = page.getByText(pattern.text);
-                const count = await locator.count();
-
-                if (count > 0) {
-                    // Click the first visible match
-                    for (let i = 0; i < Math.min(count, 3); i++) {
-                        const element = locator.nth(i);
-                        if (await element.isVisible().catch(() => false)) {
-                            await element.click().catch(() => { });
-                            logger.debug(`[SCRAPE] Clicked: "${pattern.text}"`);
-                            return true;
-                        }
-                    }
+            for (const p of patterns) {
+                const loc = page.getByText(p);
+                if (await loc.count() > 0 && await loc.first().isVisible()) {
+                    await loc.first().click().catch(() => { });
+                    return true;
                 }
             }
-        } catch (error) {
-            logger.debug('[SCRAPE] Error clicking load more:', error.message);
-        }
-
-        return false;
+            return false;
+        } catch (e) { return false; }
     }
 
     /**

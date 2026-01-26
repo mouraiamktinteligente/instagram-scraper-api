@@ -116,6 +116,12 @@ class AISelectorFallbackService {
 
         // Try each selector
         for (const selector of selectors) {
+            // ⭐ NEW: Filter out generic selectors even if they are in the registry
+            if (this.isGenericSelector(selector)) {
+                logger.debug(`[AI-FALLBACK] Skipping generic selector from registry: ${selector}`);
+                continue;
+            }
+
             try {
                 const element = await page.$(selector);
                 if (element && await element.isVisible()) {
@@ -152,6 +158,12 @@ class AISelectorFallbackService {
 
         // Try each selector
         for (const selector of selectors) {
+            // ⭐ NEW: Filter out generic selectors even if they are in the registry
+            if (this.isGenericSelector(selector)) {
+                logger.debug(`[AI-FALLBACK] Skipping generic selector from registry: ${selector}`);
+                continue;
+            }
+
             try {
                 const elements = await page.$$(selector);
                 if (elements && elements.length > 0) {
@@ -209,6 +221,34 @@ class AISelectorFallbackService {
                 logger.debug(`[AI-FALLBACK] Rejected generic selector: ${selector}`);
                 return true;
             }
+        }
+
+        // Additional patterns for common obfuscated or generic selectors
+        if (selector.includes('[tabindex="0"]') && selector.includes('[role="button"]') && selector.length < 35) {
+            logger.debug(`[AI-FALLBACK] Rejected generic button with tabindex: ${selector}`);
+            return true;
+        }
+
+        if (selector.match(/^\[aria-label=.*\]$/i) && selector.length < 15) {
+            // Too short aria-label selectors are often generic
+            return true;
+        }
+
+        // Instagram specific: obfuscated classes without enough context
+        if (selector.match(/^(\.[a-z0-9_-]{3,10}){1,2}$/i)) {
+            logger.debug(`[AI-FALLBACK] Rejected shallow obfuscated classes: ${selector}`);
+            return true;
+        }
+
+        // Additional patterns for common obfuscated or generic selectors
+        if (selector.includes('[tabindex="0"]') && selector.includes('[role="button"]') && selector.length < 30) {
+            logger.debug(`[AI-FALLBACK] Rejected generic button with tabindex: ${selector}`);
+            return true;
+        }
+
+        if (selector.match(/^\[aria-label=.*\]$/i) && selector.length < 15) {
+            // Too short aria-label selectors are often generic
+            return true;
         }
 
         // Check if it's a simple attribute selector without context
