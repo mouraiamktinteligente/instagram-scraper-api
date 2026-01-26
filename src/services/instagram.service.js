@@ -205,8 +205,11 @@ class InstagramService {
                 logger.info(`[SCRAPE] Found only ${comments.length} comments, using AI to get all...`);
 
                 try {
+                    // Detect the scroll container to pass to AI logic
+                    const scrollContainer = await this.findScrollContainer(page);
+
                     // Use the intelligent extraction that detects total and scrolls to load all
-                    const aiResult = await aiSelectorFallback.extractAllCommentsWithAI(page, postId, postUrl);
+                    const aiResult = await aiSelectorFallback.extractAllCommentsWithAI(page, postId, postUrl, scrollContainer);
 
                     if (aiResult.comments.length > 0) {
                         logger.info(`[SCRAPE] 🤖 AI extracted ${aiResult.comments.length}/${aiResult.totalExpected} comments (${aiResult.coverage}% coverage)`);
@@ -2800,6 +2803,19 @@ class InstagramService {
                 });
             }
 
+            // Strategy 4: AI discovery (Ultimate fallback)
+            logger.info('[SCRAPE] Elements not found by DOM search, trying AI discovery...');
+            const aiDiscovery = await aiSelectorFallback.findElement(page, 'view_more_comments', 'post_page');
+
+            if (aiDiscovery.element) {
+                logger.info(`[SCRAPE] ✅ AI discovered expand button: ${aiDiscovery.usedSelector}`);
+                const clickedByAI = await this.robustClick(page, aiDiscovery.element, 'AI discovered button');
+                if (clickedByAI) {
+                    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                    return true;
+                }
+            }
+
             return false;
 
         } catch (error) {
@@ -3068,12 +3084,22 @@ class InstagramService {
      * @param {string} text - Text of the button (for logging)
      * @returns {Promise<boolean>} - Whether click was successful
      */
-    async robustClick(page, element, text) {
-        logger.info('[SCRAPE] Executing robust multi-strategy click...');
-
+    async robustClick(page, element, description = 'element') {
         let clickCount = 0;
 
-        // Strategy 1: Normal Playwright click
+        // Try to scroll it into center first
+        try {
+            await element.scrollIntoViewIfNeeded().catch(() => { });
+            await randomDelay(500, 1000);
+
+            // If it's covered by a header or something, scroll a bit more
+            await page.evaluate((el) => {
+                el.scrollIntoView({ block: 'center', inline: 'center' });
+            }, element);
+            await randomDelay(500, 1000);
+        } catch (e) { /* ignore */ }
+
+        // Strategy 1: Regular click
         try {
             await element.click({ timeout: 5000 });
             clickCount++;
@@ -3228,8 +3254,33 @@ class InstagramService {
                             const rect = section.getBoundingClientRect();
                             console.log(`[CONTAINER] ✅ Found article section for comments`);
                             return {
-                                selector: null,
+                                selector: 'article section', // Use selector instead of null
                                 name: 'article-section',
+                                scrollable: true,
+                                useModal: false,
+                                useFeedPanel: true,
+                                panelCoords: {
+                                    x: rect.x + rect.width / 2,
+                                    y: rect.y + rect.height / 2
+                                },
+                                details: {
+                                    clientHeight: section.clientHeight,
+                                    scrollHeight: section.scrollHeight
+                                }
+                            };
+                        }
+                    }
+
+                    // Look for aria-label="Comments" or "Comentários"
+                    const commentsAria = article.querySelector('[aria-label*="Coment"], [aria-label*="Comment"]');
+                    if (commentsAria) {
+                        const style = window.getComputedStyle(commentsAria);
+                        if (style.overflowY === 'auto' || style.overflowY === 'scroll' || commentsAria.scrollHeight > commentsAria.clientHeight + 20) {
+                            const rect = commentsAria.getBoundingClientRect();
+                            console.log(`[CONTAINER] ✅ Found comments panel by aria-label`);
+                            return {
+                                selector: '[aria-label*="Coment"], [aria-label*="Comment"]',
+                                name: 'aria-comments-panel',
                                 scrollable: true,
                                 useModal: false,
                                 useFeedPanel: true,

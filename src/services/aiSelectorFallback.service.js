@@ -855,9 +855,10 @@ If you cannot find any comments, return:
      * @param {Page} page
      * @param {string} postId
      * @param {string} postUrl
+     * @param {Object} scrollContainer - Optional scroll container detected by InstagramService
      * @returns {Promise<{comments: Array, totalExpected: number}>}
      */
-    async extractAllCommentsWithAI(page, postId, postUrl) {
+    async extractAllCommentsWithAI(page, postId, postUrl, scrollContainer = null) {
         logger.info('[AI-FALLBACK] 🔄 Starting intelligent full comment extraction...');
 
         // Step 1: Detect total comments
@@ -895,10 +896,24 @@ If you cannot find any comments, return:
 
         while (scrollAttempts < maxScrollAttempts) {
             try {
-                const currentHeight = await page.evaluate(() => {
+                const currentHeight = await page.evaluate((containerInfo) => {
+                    if (containerInfo && containerInfo.selector) {
+                        const container = document.querySelector(containerInfo.selector);
+                        if (container) {
+                            container.scrollBy(0, 500);
+                            return container.scrollHeight;
+                        }
+                    } else if (containerInfo && containerInfo.useModal) {
+                        const dialog = document.querySelector('div[role="dialog"]');
+                        if (dialog) {
+                            dialog.scrollBy(0, 500);
+                            return dialog.scrollHeight;
+                        }
+                    }
+
                     window.scrollBy(0, 500);
                     return document.body.scrollHeight;
-                });
+                }, scrollContainer);
 
                 if (currentHeight === previousHeight) {
                     // Try clicking "load more" buttons using JavaScript text matching
