@@ -154,6 +154,29 @@ class InstagramService {
                 logger.info(`[SCRAPE] ✅ Initial GraphQL loaded: ${initialCount} comments`);
             }
 
+            // ⭐ NEW: If no comments yet, force open the comments modal
+            if (comments.length === 0) {
+                logger.info('[SCRAPE] 🔄 No comments intercepted, forcing modal open...');
+                const modalOpened = await this.openCommentsModal(page);
+                if (modalOpened) {
+                    logger.info('[SCRAPE] ✅ Modal opened, waiting for comments to load...');
+                    await randomDelay(3000, 4000);
+                    // Check if comments were intercepted
+                    if (comments.length === 0) {
+                        // Try clicking "load more" buttons that might be visible
+                        await this.clickLoadMoreButtons(page);
+                        await randomDelay(2000, 3000);
+                    }
+                }
+            }
+
+            // ⭐ NEW: Try to trigger comment loading via scroll in comment panel
+            if (comments.length === 0) {
+                logger.info('[SCRAPE] 🔄 Still no comments, attempting targeted scroll...');
+                await this.triggerCommentLoading(page);
+                await randomDelay(2000, 3000);
+            }
+
             // Scroll to load more comments (with optional limit)
             // ⭐ First, dismiss any blocking popups (Save Login Info, etc.)
             await this.dismissBlockingPopups(page);
@@ -1587,6 +1610,9 @@ class InstagramService {
         let apiCallCount = 0;
         let commentApiCalls = 0;
 
+        // Store pagination cursors for potential manual fetching
+        this.paginationCursors = [];
+
         page.on('response', async (response) => {
             const url = response.url();
             const status = response.status();
@@ -1594,13 +1620,17 @@ class InstagramService {
             // Skip non-success responses
             if (status < 200 || status >= 300) return;
 
-            // Check for any API/GraphQL endpoints
+            // ENHANCED: Check for more API/GraphQL endpoints including new Instagram patterns
             const isApiCall =
                 url.includes('/graphql') ||
                 url.includes('/api/') ||
                 url.includes('/web/') ||
                 url.includes('query') ||
-                url.includes('/v1/');
+                url.includes('/v1/') ||
+                url.includes('/v2/') ||
+                url.includes('i.instagram.com') ||
+                url.includes('comments') ||
+                url.includes('media');
 
             if (!isApiCall) return;
 
@@ -1620,9 +1650,18 @@ class InstagramService {
                 const dataKeys = data?.data ? Object.keys(data.data) : [];
                 logger.info(`[INTERCEPT] API #${apiCallCount} structure: top=[${topKeys.join(',')}] data=[${dataKeys.join(',')}]`);
 
-                // If this looks like a comment-related response, log more details
-                const jsonStr = JSON.stringify(data).substring(0, 500);
-                if (jsonStr.includes('comment') || jsonStr.includes('edge_media')) {
+                // ENHANCED: More comprehensive comment detection
+                const jsonStr = JSON.stringify(data).substring(0, 2000);
+                const isCommentRelated =
+                    jsonStr.includes('comment') ||
+                    jsonStr.includes('edge_media') ||
+                    jsonStr.includes('edge_threaded') ||
+                    jsonStr.includes('preview_child') ||
+                    jsonStr.includes('"text"') && jsonStr.includes('"user"') ||
+                    jsonStr.includes('"pk"') && jsonStr.includes('"text"') ||
+                    url.includes('comment');
+
+                if (isCommentRelated) {
                     logger.info(`[INTERCEPT] 📝 Potential comment data in API #${apiCallCount}`);
                     // Log first comment-like object structure if found
                     const samplePath = this.findCommentPath(data);
@@ -1633,7 +1672,15 @@ class InstagramService {
 
                 // Deep search for comments in the response
                 // Using the new commentExtractor for GraphQL data
-                const extractedComments = commentExtractor.extractFromGraphQL(data, postId, postUrl);
+                let extractedComments = commentExtractor.extractFromGraphQL(data, postId, postUrl);
+
+                // ENHANCED: If no comments found but looks like comment data, try alternative extraction
+                if (extractedComments.length === 0 && isCommentRelated) {
+                    extractedComments = this.alternativeCommentExtraction(data, postId, postUrl);
+                    if (extractedComments.length > 0) {
+                        logger.info(`[INTERCEPT] 🔄 Alternative extraction found ${extractedComments.length} comments`);
+                    }
+                }
 
                 if (extractedComments.length > 0) {
                     commentApiCalls++;
@@ -1649,12 +1696,16 @@ class InstagramService {
                     }
 
                     logger.info(`[INTERCEPT] Total comments so far: ${comments.length} (${commentExtractor.getStats().uniqueHashes} unique hashes)`);
+                }
 
-                    // ⭐ LOG PAGINATION INFO to understand if more comments are available
-                    const paginationInfo = this.extractPaginationInfo(data);
-                    if (paginationInfo) {
-                        logger.info(`[INTERCEPT] 📄 Pagination: has_next_page=${paginationInfo.hasNextPage}, cursor=${paginationInfo.endCursor ? paginationInfo.endCursor.substring(0, 30) + '...' : 'none'}`);
-                    }
+                // ⭐ ALWAYS extract and store pagination info for potential manual fetching
+                const paginationInfo = this.extractPaginationInfo(data);
+                if (paginationInfo && paginationInfo.hasNextPage && paginationInfo.endCursor) {
+                    logger.info(`[INTERCEPT] 📄 Pagination: has_next_page=${paginationInfo.hasNextPage}, cursor=${paginationInfo.endCursor.substring(0, 30)}...`);
+                    this.paginationCursors.push({
+                        cursor: paginationInfo.endCursor,
+                        timestamp: Date.now()
+                    });
                 }
 
             } catch (e) {
@@ -1664,6 +1715,69 @@ class InstagramService {
 
         // Log interception setup
         logger.info('[INTERCEPT] GraphQL/API interception enabled');
+    }
+
+    /**
+     * Alternative comment extraction for newer Instagram API structures
+     * Handles cases where standard extraction fails
+     */
+    alternativeCommentExtraction(data, postId, postUrl) {
+        const comments = [];
+        const seen = new Set();
+
+        const extract = (obj, depth = 0) => {
+            if (depth > 20 || !obj) return;
+
+            if (Array.isArray(obj)) {
+                obj.forEach(item => extract(item, depth + 1));
+                return;
+            }
+
+            if (typeof obj !== 'object') return;
+
+            // Pattern 1: Direct comment object with text + user/owner
+            if (obj.text && typeof obj.text === 'string' && obj.text.length > 0) {
+                const username = obj.user?.username || obj.owner?.username ||
+                                 obj.from?.username || obj.author?.username;
+                const id = obj.pk || obj.id || obj.comment_id || obj.node?.id;
+
+                if (username && id) {
+                    const key = `${username}:${obj.text.substring(0, 50)}`;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        comments.push({
+                            post_id: postId,
+                            post_url: postUrl,
+                            comment_id: String(id),
+                            text: obj.text,
+                            username: username,
+                            created_at: obj.created_at ? new Date(obj.created_at * 1000).toISOString() : new Date().toISOString(),
+                            like_count: obj.comment_like_count || obj.like_count || 0,
+                            extracted_by: 'alternative_intercept'
+                        });
+                    }
+                }
+            }
+
+            // Pattern 2: Node wrapper structure
+            if (obj.node && obj.node.text) {
+                extract(obj.node, depth + 1);
+            }
+
+            // Pattern 3: Edges array
+            if (obj.edges && Array.isArray(obj.edges)) {
+                obj.edges.forEach(edge => extract(edge, depth + 1));
+            }
+
+            // Recurse into all properties
+            for (const key of Object.keys(obj)) {
+                if (['extensions', 'request_id', 'trace_id'].includes(key)) continue;
+                extract(obj[key], depth + 1);
+            }
+        };
+
+        extract(data);
+        return comments;
     }
 
     /**
@@ -2871,9 +2985,82 @@ class InstagramService {
     async findScrollContainer(page) {
         try {
             const result = await page.evaluate(() => {
+                // Strategy 1: Modal dialog (highest priority)
                 const dialog = document.querySelector('div[role="dialog"]');
-                if (dialog) return { name: 'modal', useModal: true, scrollable: true };
+                if (dialog) {
+                    // Find the scrollable area WITHIN the dialog (usually the comments section)
+                    const scrollables = Array.from(dialog.querySelectorAll('div, section, ul')).filter(el => {
+                        const s = window.getComputedStyle(el);
+                        return (s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 30;
+                    });
 
+                    // Prefer the one with UL (comments list)
+                    const withUl = scrollables.find(el => el.querySelector('ul') || el.tagName === 'UL');
+                    if (withUl) {
+                        const r = withUl.getBoundingClientRect();
+                        return {
+                            name: 'modal-comments',
+                            useModal: true,
+                            scrollable: true,
+                            selector: 'div[role="dialog"]',
+                            panelCoords: { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+                        };
+                    }
+
+                    return { name: 'modal', useModal: true, scrollable: true, selector: 'div[role="dialog"]' };
+                }
+
+                // Strategy 2: Find comment panel by looking for sections with UL
+                const sections = document.querySelectorAll('section');
+                for (const section of sections) {
+                    const ul = section.querySelector('ul');
+                    if (ul) {
+                        const sectionRect = section.getBoundingClientRect();
+                        const style = window.getComputedStyle(section);
+                        const parentStyle = section.parentElement ? window.getComputedStyle(section.parentElement) : null;
+
+                        // Check if section or its parent is scrollable
+                        const isScrollable =
+                            section.scrollHeight > section.clientHeight + 30 ||
+                            style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+                            (parentStyle && (parentStyle.overflowY === 'auto' || parentStyle.overflowY === 'scroll'));
+
+                        if (sectionRect.width > 200 && sectionRect.height > 100) {
+                            return {
+                                name: 'comment-section',
+                                scrollable: isScrollable,
+                                selector: 'section',
+                                panelCoords: { x: sectionRect.x + sectionRect.width / 2, y: sectionRect.y + sectionRect.height / 2 }
+                            };
+                        }
+                    }
+                }
+
+                // Strategy 3: Find any scrollable container with comments-like content
+                const allScrollables = Array.from(document.querySelectorAll('div, section')).filter(el => {
+                    const s = window.getComputedStyle(el);
+                    const isScroll = (s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 50;
+                    const hasCommentContent = el.innerText && (
+                        el.innerText.includes('Responder') ||
+                        el.innerText.includes('Reply') ||
+                        el.innerText.includes('@')
+                    );
+                    return isScroll && hasCommentContent;
+                });
+
+                if (allScrollables.length > 0) {
+                    // Prefer the smallest scrollable (more likely to be comments)
+                    allScrollables.sort((a, b) => a.scrollHeight - b.scrollHeight);
+                    const best = allScrollables[0];
+                    const r = best.getBoundingClientRect();
+                    return {
+                        name: 'scrollable-with-comments',
+                        scrollable: true,
+                        panelCoords: { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+                    };
+                }
+
+                // Strategy 4: Article-based detection
                 const article = document.querySelector('article');
                 if (article) {
                     const scrollable = Array.from(article.querySelectorAll('div, section')).find(el => {
@@ -2885,31 +3072,171 @@ class InstagramService {
                         return { name: 'inline', scrollable: true, panelCoords: { x: r.x + r.width / 2, y: r.y + r.height / 2 } };
                     }
                 }
+
                 return { name: 'window', scrollable: false };
             });
+
+            logger.info(`[SCROLL-CONTAINER] Detected: ${result.name}, scrollable=${result.scrollable}`);
             return result;
         } catch (e) {
+            logger.warn('[SCROLL-CONTAINER] Detection error:', e.message);
             return { name: 'error', scrollable: false };
         }
     }
 
     /**
-     * Try to open comments modal
+     * Try to open comments modal - ENHANCED with multiple strategies
+     * This is CRITICAL for FEED_INLINE layouts where comments aren't loaded
      */
     async openCommentsModal(page) {
         try {
-            if (await page.$('div[role="dialog"]')) return true;
-            const selectors = ['a[href*="/comments/"]', 'svg[aria-label*="Coment"]', 'span:has-text("comentário")'];
-            for (const sel of selectors) {
-                const el = await page.$(sel);
-                if (el && await el.isVisible()) {
-                    await el.click();
-                    await randomDelay(2000, 3000);
-                    if (await page.$('div[role="dialog"]')) return true;
+            // Check if modal is already open
+            if (await page.$('div[role="dialog"]')) {
+                logger.info('[MODAL] ✅ Modal already open');
+                return true;
+            }
+
+            logger.info('[MODAL] 🔄 Attempting to open comments modal...');
+
+            // ====== STRATEGY 1: Click on speech bubble (comment icon) ======
+            // This is the most reliable way to open comments modal
+            const iconStrategies = [
+                // SVG with aria-label
+                'svg[aria-label*="Comment"]',
+                'svg[aria-label*="Comentar"]',
+                'svg[aria-label*="Coment"]',
+                // Parent of SVG (clickable container)
+                'div:has(> svg[aria-label*="Comment"])',
+                'div:has(> svg[aria-label*="Comentar"])',
+                'span:has(> svg[aria-label*="Comment"])',
+                // Generic comment icon patterns
+                '[data-testid="comment"]',
+                '[aria-label*="comment" i]',
+                '[aria-label*="comentar" i]',
+            ];
+
+            for (const sel of iconStrategies) {
+                try {
+                    const el = await page.$(sel);
+                    if (el && await el.isVisible()) {
+                        logger.info(`[MODAL] Strategy 1: Clicking icon with: ${sel}`);
+                        await el.click();
+                        await randomDelay(2000, 3000);
+                        if (await page.$('div[role="dialog"]')) {
+                            logger.info('[MODAL] ✅ Modal opened via icon click');
+                            return true;
+                        }
+                    }
+                } catch (e) { /* try next */ }
+            }
+
+            // ====== STRATEGY 2: Click on comment count text ======
+            // "Ver todos os X comentários" or "X comments"
+            const commentTextClicked = await page.evaluate(() => {
+                const patterns = [
+                    /ver\s+todos?\s+os?\s+(\d+)\s*coment/i,
+                    /view\s+all\s+(\d+)\s*comment/i,
+                    /(\d+)\s*coment[áa]rios?/i,
+                    /(\d+)\s*comments?/i,
+                ];
+
+                const elements = document.querySelectorAll('span, a, div, button');
+                for (const el of elements) {
+                    const text = el.innerText || el.textContent || '';
+                    for (const pattern of patterns) {
+                        if (pattern.test(text) && text.length < 50) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                el.click();
+                                return { clicked: true, text: text.substring(0, 40) };
+                            }
+                        }
+                    }
+                }
+                return { clicked: false };
+            });
+
+            if (commentTextClicked.clicked) {
+                logger.info(`[MODAL] Strategy 2: Clicked on "${commentTextClicked.text}"`);
+                await randomDelay(2500, 3500);
+                if (await page.$('div[role="dialog"]')) {
+                    logger.info('[MODAL] ✅ Modal opened via comment count click');
+                    return true;
                 }
             }
+
+            // ====== STRATEGY 3: Direct navigation to /comments/ URL ======
+            const currentUrl = page.url();
+            if (currentUrl.includes('/p/') && !currentUrl.includes('/comments/')) {
+                try {
+                    const commentsUrl = currentUrl.replace(/\/?$/, '/comments/');
+                    logger.info(`[MODAL] Strategy 3: Navigating to ${commentsUrl}`);
+                    await page.goto(commentsUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                    await randomDelay(2000, 3000);
+                    // Check if comments loaded (may not open modal but will load comments)
+                    const hasComments = await page.evaluate(() => {
+                        return document.body.innerText.includes('Responder') ||
+                               document.body.innerText.includes('Reply') ||
+                               document.querySelectorAll('ul li').length > 5;
+                    });
+                    if (hasComments) {
+                        logger.info('[MODAL] ✅ Comments loaded via direct URL navigation');
+                        return true;
+                    }
+                } catch (e) {
+                    logger.warn('[MODAL] Strategy 3 failed:', e.message);
+                }
+            }
+
+            // ====== STRATEGY 4: Click within post action bar ======
+            // Find the action bar (like, comment, share, save) and click comment
+            const actionBarClicked = await page.evaluate(() => {
+                // Look for the row of action buttons (usually contains Like, Comment, Share, Save)
+                const sections = document.querySelectorAll('section');
+                for (const section of sections) {
+                    const svgs = section.querySelectorAll('svg');
+                    if (svgs.length >= 3 && svgs.length <= 6) {
+                        // This might be the action bar - click second SVG (usually comment)
+                        const commentSvg = svgs[1];
+                        if (commentSvg) {
+                            const clickTarget = commentSvg.closest('div') || commentSvg.parentElement || commentSvg;
+                            clickTarget.click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            });
+
+            if (actionBarClicked) {
+                logger.info('[MODAL] Strategy 4: Clicked in action bar');
+                await randomDelay(2000, 3000);
+                if (await page.$('div[role="dialog"]')) {
+                    logger.info('[MODAL] ✅ Modal opened via action bar click');
+                    return true;
+                }
+            }
+
+            // ====== STRATEGY 5: Use AI to find and click ======
+            try {
+                logger.info('[MODAL] Strategy 5: Using AI to find comment opener...');
+                const aiResult = await aiSelectorFallback.findElement(page, 'view_more_comments', 'post_page');
+                if (aiResult.element) {
+                    await aiResult.element.click();
+                    await randomDelay(2500, 3500);
+                    if (await page.$('div[role="dialog"]')) {
+                        logger.info('[MODAL] ✅ Modal opened via AI discovery');
+                        return true;
+                    }
+                }
+            } catch (e) { /* continue */ }
+
+            logger.warn('[MODAL] ⚠️ Could not open comments modal with any strategy');
             return false;
-        } catch (e) { return false; }
+        } catch (e) {
+            logger.error('[MODAL] Error:', e.message);
+            return false;
+        }
     }
 
     /**
@@ -2927,6 +3254,119 @@ class InstagramService {
             }
             return false;
         } catch (e) { return false; }
+    }
+
+    /**
+     * Trigger comment loading through multiple strategies
+     * Used when GraphQL interception fails to capture comments
+     */
+    async triggerCommentLoading(page) {
+        logger.info('[TRIGGER] 🔄 Attempting to trigger comment loading...');
+
+        try {
+            // Strategy 1: Find and scroll within the comments panel directly
+            const scrolledInPanel = await page.evaluate(() => {
+                // Look for the comments section container
+                const selectors = [
+                    'div[role="dialog"] section',
+                    'article section',
+                    'div[style*="overflow"]',
+                    'ul[class*="Comment"]',
+                    'div[class*="Comment"]',
+                ];
+
+                for (const sel of selectors) {
+                    const container = document.querySelector(sel);
+                    if (container) {
+                        const style = window.getComputedStyle(container);
+                        const isScrollable = container.scrollHeight > container.clientHeight ||
+                                            style.overflowY === 'scroll' ||
+                                            style.overflowY === 'auto';
+                        if (isScrollable || container.scrollHeight > 200) {
+                            // Scroll down to trigger lazy loading
+                            container.scrollTop = container.scrollHeight;
+                            return { scrolled: true, selector: sel };
+                        }
+                    }
+                }
+
+                // Fallback: scroll within any section with UL
+                const sections = document.querySelectorAll('section');
+                for (const section of sections) {
+                    if (section.querySelector('ul')) {
+                        section.scrollTop = section.scrollHeight;
+                        return { scrolled: true, selector: 'section with ul' };
+                    }
+                }
+
+                return { scrolled: false };
+            });
+
+            if (scrolledInPanel.scrolled) {
+                logger.info(`[TRIGGER] ✅ Scrolled in container: ${scrolledInPanel.selector}`);
+                await randomDelay(1500, 2000);
+            }
+
+            // Strategy 2: Click any expandable elements
+            const clickedExpandable = await page.evaluate(() => {
+                const expandPatterns = [
+                    /ver\s+\d+\s*respostas?/i,
+                    /view\s+\d+\s*repl/i,
+                    /mostrar\s+mais/i,
+                    /show\s+more/i,
+                    /\+\s*\d+/,
+                    /\d+\s*mais/i,
+                ];
+
+                const elements = document.querySelectorAll('span, button, div[role="button"], a');
+                let clicked = 0;
+
+                for (const el of elements) {
+                    const text = el.innerText || el.textContent || '';
+                    for (const pattern of expandPatterns) {
+                        if (pattern.test(text) && text.length < 40) {
+                            el.click();
+                            clicked++;
+                            if (clicked >= 3) return clicked; // Limit clicks
+                        }
+                    }
+                }
+
+                return clicked;
+            });
+
+            if (clickedExpandable > 0) {
+                logger.info(`[TRIGGER] ✅ Clicked ${clickedExpandable} expandable elements`);
+                await randomDelay(2000, 3000);
+            }
+
+            // Strategy 3: Hover over comment area to trigger lazy loading
+            const commentArea = await page.$('article ul, div[role="dialog"] ul, section ul');
+            if (commentArea) {
+                const box = await commentArea.boundingBox();
+                if (box) {
+                    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+                    await randomDelay(500, 1000);
+                    // Small scroll movement
+                    await page.mouse.wheel({ deltaY: 300 });
+                    await randomDelay(1000, 1500);
+                    logger.info('[TRIGGER] ✅ Performed mouse hover + wheel in comment area');
+                }
+            }
+
+            // Strategy 4: Focus on comment input to trigger loading
+            const commentInput = await page.$('textarea[placeholder*="coment"], textarea[placeholder*="comment"], input[placeholder*="coment"]');
+            if (commentInput) {
+                await commentInput.focus();
+                await randomDelay(500, 1000);
+                logger.info('[TRIGGER] ✅ Focused on comment input');
+            }
+
+            return true;
+        } catch (e) {
+            logger.warn('[TRIGGER] Error:', e.message);
+            return false;
+        }
     }
 
     /**

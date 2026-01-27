@@ -889,9 +889,11 @@ If you cannot find any comments, return:
 
     /**
      * Extract ALL comments from a post, using multiple strategies
+     * ENHANCED: Iterative extraction with progressive loading
      * 1. First detects total count
-     * 2. Scrolls/clicks to load all
-     * 3. Extracts via AI if needed
+     * 2. Expands all replies/threads
+     * 3. Scrolls/clicks to load all with multiple iterations
+     * 4. Extracts via AI with incremental merging
      * @param {Page} page
      * @param {string} postId
      * @param {string} postUrl
@@ -899,7 +901,10 @@ If you cannot find any comments, return:
      * @returns {Promise<{comments: Array, totalExpected: number}>}
      */
     async extractAllCommentsWithAI(page, postId, postUrl, scrollContainer = null) {
-        logger.info('[AI-FALLBACK] 🔄 Starting intelligent full comment extraction...');
+        logger.info('[AI-FALLBACK] 🔄 Starting intelligent full comment extraction (ENHANCED)...');
+
+        const allComments = [];
+        const seenTexts = new Set();
 
         // Step 1: Detect total comments
         const { total: totalExpected, expandButtonText } = await this.detectTotalComments(page);
@@ -908,7 +913,6 @@ If you cannot find any comments, return:
         // Step 2: If we found an expand button, click it
         if (expandButtonText) {
             try {
-                // Find and click the expand button
                 const clicked = await page.evaluate((buttonText) => {
                     const elements = document.querySelectorAll('a, span, button, div[role="button"]');
                     for (const el of elements) {
@@ -929,70 +933,189 @@ If you cannot find any comments, return:
             }
         }
 
-        // Step 3: Scroll to load more comments
-        let previousHeight = 0;
-        let scrollAttempts = 0;
-        const maxScrollAttempts = 20; // Max 20 scroll attempts
+        // Step 3: ENHANCED - Find the correct scroll container
+        const container = await page.evaluate(() => {
+            // Priority 1: Modal dialog
+            const dialog = document.querySelector('div[role="dialog"]');
+            if (dialog) {
+                // Find scrollable area within dialog
+                const scrollables = Array.from(dialog.querySelectorAll('div, section')).filter(el => {
+                    const s = window.getComputedStyle(el);
+                    return (s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+                           el.scrollHeight > el.clientHeight + 30;
+                });
+                if (scrollables.length > 0) {
+                    return { type: 'modal-inner', found: true };
+                }
+                return { type: 'modal', found: true };
+            }
 
-        while (scrollAttempts < maxScrollAttempts) {
-            try {
-                const currentHeight = await page.evaluate((containerInfo) => {
-                    if (containerInfo && containerInfo.selector) {
-                        const container = document.querySelector(containerInfo.selector);
-                        if (container) {
-                            container.scrollBy(0, 500);
-                            return container.scrollHeight;
-                        }
-                    } else if (containerInfo && containerInfo.useModal) {
-                        const dialog = document.querySelector('div[role="dialog"]');
-                        if (dialog) {
-                            dialog.scrollBy(0, 500);
-                            return dialog.scrollHeight;
+            // Priority 2: Section with UL
+            const sections = document.querySelectorAll('section');
+            for (const section of sections) {
+                if (section.querySelector('ul')) {
+                    return { type: 'section', found: true };
+                }
+            }
+
+            // Priority 3: Article
+            const article = document.querySelector('article');
+            if (article) return { type: 'article', found: true };
+
+            return { type: 'window', found: false };
+        });
+
+        logger.info(`[AI-FALLBACK] Scroll container: ${container.type}`);
+
+        // Step 4: ENHANCED - Iterative scroll + expand + extract cycle
+        const MAX_ITERATIONS = 5;
+        const MAX_SCROLLS_PER_ITERATION = 15;
+
+        for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+            logger.info(`[AI-FALLBACK] 🔄 Iteration ${iteration + 1}/${MAX_ITERATIONS}`);
+
+            // 4a: Expand all visible "View replies" buttons
+            const expandedReplies = await page.evaluate(() => {
+                const patterns = [
+                    /ver\s+\d+\s*respostas?/i,
+                    /view\s+\d+\s*repl/i,
+                    /ver\s+respostas?/i,
+                    /\d+\s*respostas?/i,
+                    /\d+\s*replies?/i,
+                    /mostrar\s+respostas/i,
+                ];
+
+                let clicked = 0;
+                const elements = document.querySelectorAll('span, button, div[role="button"], a');
+
+                for (const el of elements) {
+                    const text = el.innerText || el.textContent || '';
+                    for (const pattern of patterns) {
+                        if (pattern.test(text) && text.length < 50) {
+                            try {
+                                el.click();
+                                clicked++;
+                            } catch (e) { /* ignore */ }
+                            break;
                         }
                     }
+                }
+                return clicked;
+            });
 
-                    window.scrollBy(0, 500);
-                    return document.body.scrollHeight;
-                }, scrollContainer);
+            if (expandedReplies > 0) {
+                logger.info(`[AI-FALLBACK] ✅ Expanded ${expandedReplies} reply threads`);
+                await new Promise(r => setTimeout(r, 2000));
+            }
 
-                if (currentHeight === previousHeight) {
-                    // Try clicking "load more" buttons using JavaScript text matching
-                    await page.evaluate(() => {
-                        const buttons = document.querySelectorAll('button, span, div[role="button"], a');
-                        for (const btn of buttons) {
-                            const text = btn.innerText?.toLowerCase() || '';
-                            if (text.includes('mais') || text.includes('carregar') || text === '+') {
-                                btn.click();
+            // 4b: Scroll to load more
+            let previousHeight = 0;
+            let noChangeCount = 0;
+
+            for (let scroll = 0; scroll < MAX_SCROLLS_PER_ITERATION; scroll++) {
+                const currentHeight = await page.evaluate((containerType) => {
+                    let scrollTarget = null;
+
+                    if (containerType === 'modal' || containerType === 'modal-inner') {
+                        const dialog = document.querySelector('div[role="dialog"]');
+                        if (dialog) {
+                            // Find innermost scrollable
+                            const inner = Array.from(dialog.querySelectorAll('div')).find(el => {
+                                const s = window.getComputedStyle(el);
+                                return (s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+                                       el.scrollHeight > el.clientHeight + 30;
+                            });
+                            scrollTarget = inner || dialog;
+                        }
+                    } else if (containerType === 'section') {
+                        const sections = document.querySelectorAll('section');
+                        for (const section of sections) {
+                            if (section.querySelector('ul')) {
+                                scrollTarget = section;
                                 break;
                             }
                         }
+                    } else if (containerType === 'article') {
+                        scrollTarget = document.querySelector('article');
+                    }
+
+                    if (scrollTarget) {
+                        scrollTarget.scrollTop = scrollTarget.scrollHeight;
+                        return scrollTarget.scrollHeight;
+                    }
+
+                    window.scrollTo(0, document.body.scrollHeight);
+                    return document.body.scrollHeight;
+                }, container.type);
+
+                if (currentHeight === previousHeight) {
+                    noChangeCount++;
+                    if (noChangeCount >= 3) break;
+
+                    // Try clicking load more
+                    await page.evaluate(() => {
+                        const loadMorePatterns = [/carregar\s*mais/i, /load\s*more/i, /mais\s*coment/i, /\+/];
+                        const elements = document.querySelectorAll('button, span, div[role="button"], a');
+                        for (const el of elements) {
+                            const text = el.innerText || '';
+                            for (const p of loadMorePatterns) {
+                                if (p.test(text) && text.length < 30) {
+                                    el.click();
+                                    return;
+                                }
+                            }
+                        }
                     });
-                    scrollAttempts++;
                 } else {
-                    scrollAttempts = 0; // Reset if new content loaded
+                    noChangeCount = 0;
                 }
 
                 previousHeight = currentHeight;
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 800));
+            }
 
-                // Check if we've likely loaded all
-                if (scrollAttempts >= 3) break;
-            } catch (scrollError) {
-                logger.warn('[AI-FALLBACK] Scroll error:', scrollError.message);
+            // 4c: Extract comments after this iteration
+            const iterationComments = await this.extractCommentsDirectly(page, postId, postUrl);
+
+            // Merge with existing, avoiding duplicates
+            let newCount = 0;
+            for (const comment of iterationComments) {
+                const key = `${comment.username}:${(comment.text || '').substring(0, 50)}`;
+                if (!seenTexts.has(key)) {
+                    seenTexts.add(key);
+                    allComments.push(comment);
+                    newCount++;
+                }
+            }
+
+            logger.info(`[AI-FALLBACK] Iteration ${iteration + 1}: Found ${newCount} new comments (total: ${allComments.length})`);
+
+            // Check if we've reached our target or no new comments
+            if (allComments.length >= totalExpected * 0.9) {
+                logger.info('[AI-FALLBACK] ✅ Reached ~90% of expected comments, stopping');
                 break;
+            }
+
+            if (newCount === 0 && iteration > 0) {
+                logger.info('[AI-FALLBACK] No new comments found, trying one more scroll cycle');
+                // Do one more aggressive scroll
+                await page.evaluate(() => {
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    if (dialog) {
+                        dialog.scrollTop = dialog.scrollHeight;
+                    }
+                    window.scrollTo(0, document.body.scrollHeight);
+                });
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
 
-        // Step 4: Extract comments using AI
-        logger.info('[AI-FALLBACK] Extracting all visible comments with AI...');
-        const comments = await this.extractCommentsDirectly(page, postId, postUrl);
-
-        logger.info(`[AI-FALLBACK] Extracted ${comments.length}/${totalExpected} comments`);
+        logger.info(`[AI-FALLBACK] ✅ Final extraction: ${allComments.length}/${totalExpected} comments`);
 
         return {
-            comments,
+            comments: allComments,
             totalExpected,
-            coverage: totalExpected > 0 ? Math.round((comments.length / totalExpected) * 100) : 100
+            coverage: totalExpected > 0 ? Math.round((allComments.length / totalExpected) * 100) : 100
         };
     }
 }
