@@ -135,6 +135,15 @@ class AccountPoolService {
     }
 
     /**
+     * Get the number of available (non-banned) accounts
+     */
+    getAccountCount() {
+        return this.accounts.filter(a =>
+            this.accountStatus.get(a.username)?.status !== 'banned'
+        ).length;
+    }
+
+    /**
      * Report error for an account
      */
     async reportError(username, error) {

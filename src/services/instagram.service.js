@@ -97,32 +97,50 @@ class InstagramService {
 
         let browser = null;
         let context = null;
+        let account = null;
         const comments = [];
 
-        try {
-            // Get next available account
-            const account = accountPool.getNextAccount();
-            if (!account) {
-                throw new Error('No Instagram accounts available. Configure INSTAGRAM_ACCOUNTS env variable.');
+        // Try all available accounts before giving up
+        const maxAccountAttempts = accountPool.getAccountCount();
+        let loggedIn = false;
+
+        for (let attempt = 0; attempt < maxAccountAttempts; attempt++) {
+            account = accountPool.getNextAccount();
+            if (!account) break;
+
+            logger.info(`[SCRAPE] Trying account: ${account.username} (${attempt + 1}/${maxAccountAttempts})`);
+
+            try {
+                browser = await this.launchBrowser(proxy);
+                context = await this.createBrowserContext(browser);
+                loggedIn = await this.ensureLoggedIn(context, account);
+
+                if (loggedIn) {
+                    logger.info(`[SCRAPE] Using account: ${account.username}`);
+                    break;
+                }
+
+                logger.warn(`[SCRAPE] Account ${account.username} login failed, trying next...`);
+                accountPool.reportError(account.username, 'Login failed');
+            } catch (loginError) {
+                logger.warn(`[SCRAPE] Account ${account.username} error: ${loginError.message}, trying next...`);
+                accountPool.reportError(account.username, loginError.message);
             }
 
-            logger.info(`[SCRAPE] Using account: ${account.username}`);
+            // Cleanup before trying next account
+            if (context) try { await context.close(); } catch (e) { /* ignore */ }
+            if (browser) try { await browser.close(); } catch (e) { /* ignore */ }
+            browser = null;
+            context = null;
+        }
 
+        if (!loggedIn || !account) {
+            throw new Error('All Instagram accounts failed to login');
+        }
+
+        try {
             // Reset comment extractor for this session (clear hashes)
             commentExtractor.reset();
-
-            // Launch browser
-            browser = await this.launchBrowser(proxy);
-
-            // Create browser context
-            context = await this.createBrowserContext(browser);
-
-            // Try to load existing session or perform login
-            const loggedIn = await this.ensureLoggedIn(context, account);
-            if (!loggedIn) {
-                accountPool.reportError(account.username, 'Login failed');
-                throw new Error(`Failed to login with account ${account.username}`);
-            }
 
             // Create page and setup interception
             const page = await context.newPage();
