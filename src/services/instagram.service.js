@@ -435,13 +435,19 @@ class InstagramService {
 
             // Check if we hit a login wall
             const isLoginRequired = await page.evaluate(() => {
-                const loginSelectors = [
-                    'input[name="username"]',
-                    '[data-testid="login-button"]',
-                    'button:has-text("Log In")',
-                    'a[href*="/accounts/login"]'
-                ];
-                return loginSelectors.some(sel => document.querySelector(sel) !== null);
+                // Check for login form elements (using valid CSS selectors only)
+                const hasLoginInput = document.querySelector('input[name="username"]') !== null;
+                const hasLoginButton = document.querySelector('[data-testid="login-button"]') !== null;
+                const hasLoginLink = document.querySelector('a[href*="/accounts/login"]') !== null;
+
+                // Check for "Log In" text in buttons (since :has-text is not valid CSS)
+                const buttons = document.querySelectorAll('button');
+                const hasLoginText = Array.from(buttons).some(btn =>
+                    btn.textContent?.toLowerCase().includes('log in') ||
+                    btn.textContent?.toLowerCase().includes('entrar')
+                );
+
+                return hasLoginInput || hasLoginButton || hasLoginLink || hasLoginText;
             });
 
             if (isLoginRequired) {
