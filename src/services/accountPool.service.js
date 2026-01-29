@@ -182,13 +182,41 @@ class AccountPoolService {
             'rate limit'
         ];
 
-        const isBan = banIndicators.some(indicator =>
+        const hardBanIndicators = [
+            'login_required',
+            'checkpoint_required',
+            'challenge_required',
+            'blocked',
+            'suspended',
+            'incorrect password',
+            'senha incorreta'
+        ];
+
+        const tempErrorIndicators = [
+            'timeout',
+            'proxy',
+            'network',
+            'rate limit',
+            'wait some minutes',
+            'aguarde alguns minutos'
+        ];
+
+        const isHardBan = hardBanIndicators.some(indicator =>
             error.toLowerCase().includes(indicator.toLowerCase())
         );
 
-        if (isBan || status.errorCount >= 3) {
+        const isTempError = tempErrorIndicators.some(indicator =>
+            error.toLowerCase().includes(indicator.toLowerCase())
+        );
+
+        // Ban logic: 
+        // 1. Hard ban detected (permanent or credential issue)
+        // 2. High error count (persistent issues, even if temp)
+        const ERROR_THRESHOLD = isTempError ? 5 : 3;
+
+        if (isHardBan || status.errorCount >= ERROR_THRESHOLD) {
             status.status = 'banned';
-            logger.warn(`Account ${username} marked as banned: ${error}`);
+            logger.warn(`Account ${username} marked as banned/inactive: ${error} (Errors: ${status.errorCount})`);
 
             // Update database
             try {
@@ -203,6 +231,7 @@ class AccountPoolService {
                 logger.debug('Failed to update account ban status in DB:', e.message);
             }
         } else {
+            logger.info(`Reported error for ${username}: ${error}. Fail count: ${status.errorCount}/${ERROR_THRESHOLD}`);
             // Just update fail count
             try {
                 await this.supabase

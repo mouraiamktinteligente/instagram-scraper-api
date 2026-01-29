@@ -698,18 +698,19 @@ class InstagramService {
 
                 // Multiple possible selectors for cookie consent
                 const cookieSelectors = [
+                    // Portuguese variants (First, as system is pt-BR)
+                    'button:has-text("Permitir todos os cookies")',
+                    'button:has-text("Permitir cookies essenciais e opcionais")',
+                    'button:has-text("Aceitar tudo")',
+                    'button:has-text("Aceitar")',
+                    'button:has-text("Permitir somente cookies essenciais")',
+                    'button[role="button"]:has-text("Permitir")',
                     // English variants
                     'button:has-text("Allow all cookies")',
                     'button:has-text("Allow essential and optional cookies")',
                     'button:has-text("Accept All")',
                     'button:has-text("Accept")',
                     'button:has-text("Only allow essential cookies")',
-                    // Portuguese variants
-                    'button:has-text("Permitir todos os cookies")',
-                    'button:has-text("Permitir cookies essenciais e opcionais")',
-                    'button:has-text("Aceitar tudo")',
-                    'button:has-text("Aceitar")',
-                    'button:has-text("Permitir somente cookies essenciais")',
                     // Generic patterns
                     '[role="dialog"] button:first-of-type',
                     'div[role="dialog"] button',
@@ -817,9 +818,15 @@ class InstagramService {
             // Try multiple selectors for username field
             const usernameSelectors = [
                 'input[name="username"]',
-                'input[aria-label="Phone number, username, or email"]',
-                'input[aria-label="Telefone, nome de usuário ou email"]',
-                'input[type="text"]',
+                'input[name="email"]',
+                'input[aria-label*="usuário"]',
+                'input[aria-label*="username"]',
+                'input[aria-label*="email"]',
+                'input[aria-label*="celular"]',
+                'input[placeholder*="usuário"]',
+                'input[placeholder*="email"]',
+                'input[placeholder*="celular"]',
+                'input[type="text"]:first-of-type',
                 'form input:first-of-type'
             ];
 
@@ -858,9 +865,12 @@ class InstagramService {
             // Try multiple selectors for password field
             const passwordSelectors = [
                 'input[name="password"]',
+                'input[name="pass"]',
                 'input[type="password"]',
                 'input[aria-label*="password"]',
                 'input[aria-label*="Senha"]',
+                'input[placeholder*="Senha"]',
+                'input[placeholder*="Password"]',
             ];
 
             let passwordFilled = false;
@@ -891,13 +901,14 @@ class InstagramService {
 
             const loginButtonSelectors = [
                 'button[type="submit"]',
+                'button:has-text("Entrar")',
                 'button:has-text("Log in")',
                 'button:has-text("Log In")',
-                'button:has-text("Entrar")',
-                'div[role="button"]:has-text("Log in")',
                 'div[role="button"]:has-text("Entrar")',
+                'div[role="button"]:has-text("Log in")',
                 'button._acan._acap._acas._aj1-._ap30',
                 'form button',
+                'button:first-of-type',
             ];
 
             let loginClicked = false;
@@ -1986,7 +1997,7 @@ class InstagramService {
             // Pattern 1: Direct comment object with text + user/owner
             if (obj.text && typeof obj.text === 'string' && obj.text.length > 0) {
                 const username = obj.user?.username || obj.owner?.username ||
-                                 obj.from?.username || obj.author?.username;
+                    obj.from?.username || obj.author?.username;
                 const id = obj.pk || obj.id || obj.comment_id || obj.node?.id;
 
                 if (username && id) {
@@ -3424,8 +3435,8 @@ class InstagramService {
                     // Check if comments loaded (may not open modal but will load comments)
                     const hasComments = await page.evaluate(() => {
                         return document.body.innerText.includes('Responder') ||
-                               document.body.innerText.includes('Reply') ||
-                               document.querySelectorAll('ul li').length > 5;
+                            document.body.innerText.includes('Reply') ||
+                            document.querySelectorAll('ul li').length > 5;
                     });
                     if (hasComments) {
                         logger.info('[MODAL] ✅ Comments loaded via direct URL navigation');
@@ -3528,8 +3539,8 @@ class InstagramService {
                     if (container) {
                         const style = window.getComputedStyle(container);
                         const isScrollable = container.scrollHeight > container.clientHeight ||
-                                            style.overflowY === 'scroll' ||
-                                            style.overflowY === 'auto';
+                            style.overflowY === 'scroll' ||
+                            style.overflowY === 'auto';
                         if (isScrollable || container.scrollHeight > 200) {
                             // Scroll down to trigger lazy loading
                             container.scrollTop = container.scrollHeight;

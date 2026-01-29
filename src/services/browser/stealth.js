@@ -78,7 +78,7 @@ class StealthService {
             // Patch 5: User-Agent consistente com headers
             await page.addInitScript(() => {
                 Object.defineProperty(navigator, 'platform', {
-                    get: () => 'Linux x86_64',
+                    get: () => 'Win32',
                 });
             });
 
