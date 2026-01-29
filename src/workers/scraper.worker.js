@@ -85,7 +85,7 @@ function createQueue(name, proxy, index) {
 
     // Process jobs
     queue.process(config.queue.concurrency, async (job) => {
-        const { postUrl, jobId, maxComments } = job.data;
+        const { postUrl, jobId, maxComments, mode = 'auto' } = job.data;
 
         logger.queue(`Processing job`, {
             jobId,
@@ -94,6 +94,7 @@ function createQueue(name, proxy, index) {
             proxyIndex: index,
             attempt: job.attemptsMade + 1,
             maxComments,
+            mode,
         });
 
         try {
@@ -102,8 +103,8 @@ function createQueue(name, proxy, index) {
                 started_at: new Date().toISOString()
             });
 
-            // Perform scraping with optional comment limit
-            const result = await instagramService.scrapeComments(postUrl, proxy, jobId, maxComments);
+            // Perform scraping with optional comment limit and mode
+            const result = await instagramService.scrapeComments(postUrl, proxy, jobId, maxComments, mode);
 
             // Report proxy success
             if (proxy) {
@@ -189,7 +190,7 @@ function createQueue(name, proxy, index) {
  */
 let currentQueueIndex = 0;
 
-async function addJob(postUrl, jobId, maxComments = null) {
+async function addJob(postUrl, jobId, maxComments = null, mode = 'auto') {
     // Ensure queues are initialized (loads proxies from database)
     const activeQueues = await initializeQueues();
 
@@ -201,6 +202,7 @@ async function addJob(postUrl, jobId, maxComments = null) {
         postUrl,
         jobId,
         maxComments,  // Optional limit for comments
+        mode,         // Scraping mode: 'public', 'authenticated', 'auto'
         createdAt: new Date().toISOString(),
     });
 
@@ -209,6 +211,7 @@ async function addJob(postUrl, jobId, maxComments = null) {
         queueName: queue.name,
         bullJobId: job.id,
         maxComments,
+        mode,
     });
 
     return {

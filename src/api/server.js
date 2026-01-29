@@ -90,11 +90,20 @@ app.get('/api/health', async (req, res) => {
 /**
  * Create a new scrape job
  * POST /api/scrape
- * Body: { postUrl: "https://instagram.com/p/ABC123", maxComments: 100 (optional) }
+ * Body: {
+ *   postUrl: "https://instagram.com/p/ABC123",
+ *   maxComments: 100 (optional),
+ *   mode: "public" | "authenticated" | "auto" (optional, default: "auto")
+ * }
+ *
+ * Mode options:
+ * - "public": Extract only public comments (no login needed, zero account ban risk)
+ * - "authenticated": Always use account login (more comments, but account ban risk)
+ * - "auto": Try public first, fall back to authenticated if needed (default)
  */
 app.post('/api/scrape', async (req, res) => {
     try {
-        const { postUrl, maxComments } = req.body;
+        const { postUrl, maxComments, mode = 'auto' } = req.body;
 
         // Validate input
         if (!postUrl) {
@@ -114,6 +123,10 @@ app.post('/api/scrape', async (req, res) => {
 
         // Validate maxComments if provided
         const commentLimit = maxComments ? Math.max(1, parseInt(maxComments)) : null;
+
+        // Validate mode parameter
+        const validModes = ['public', 'authenticated', 'auto'];
+        const scrapeMode = validModes.includes(mode) ? mode : 'auto';
 
         // Create job in database
         const { data: jobData, error: jobError } = await supabase
@@ -135,14 +148,15 @@ app.post('/api/scrape', async (req, res) => {
             });
         }
 
-        // Add job to queue with optional maxComments
-        const queueResult = await worker.addJob(postUrl, jobData.id, commentLimit);
+        // Add job to queue with optional maxComments and mode
+        const queueResult = await worker.addJob(postUrl, jobData.id, commentLimit, scrapeMode);
 
         logger.api('Job created', {
             jobId: jobData.id,
             postUrl,
             postId,
             maxComments: commentLimit,
+            mode: scrapeMode,
         });
 
         res.status(201).json({
@@ -151,6 +165,7 @@ app.post('/api/scrape', async (req, res) => {
             postUrl,
             postId,
             maxComments: commentLimit,
+            mode: scrapeMode,
             queue: queueResult.queueName,
             createdAt: jobData.created_at,
         });

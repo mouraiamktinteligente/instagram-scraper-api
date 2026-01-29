@@ -74,6 +74,26 @@ class AccountPoolService {
 
             logger.info(`AccountPool loaded ${this.accounts.length} accounts from database`);
 
+            // CRITICAL: Warn if no accounts are available
+            if (this.accounts.length === 0) {
+                logger.error('═══════════════════════════════════════════════════════════════');
+                logger.error('[CRITICAL] NO INSTAGRAM ACCOUNTS AVAILABLE!');
+                logger.error('═══════════════════════════════════════════════════════════════');
+                logger.error('The scraper cannot work without accounts.');
+                logger.error('');
+                logger.error('Possible causes:');
+                logger.error('  1. No accounts in instagram_accounts table');
+                logger.error('  2. All accounts have is_active = false');
+                logger.error('  3. All accounts have is_banned = true');
+                logger.error('');
+                logger.error('To fix, run this SQL in Supabase:');
+                logger.error('  SELECT id, username, is_active, is_banned FROM instagram_accounts;');
+                logger.error('');
+                logger.error('To reset banned accounts:');
+                logger.error('  UPDATE instagram_accounts SET is_banned = false, is_active = true, fail_count = 0;');
+                logger.error('═══════════════════════════════════════════════════════════════');
+            }
+
             // Debug: log accounts with TOTP
             const accountsWithTOTP = this.accounts.filter(a => a.totpSecret);
             logger.info(`[DEBUG] Accounts with TOTP secret: ${accountsWithTOTP.length}`);

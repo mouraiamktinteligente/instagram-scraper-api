@@ -1,6 +1,6 @@
 # Instagram Scraper - Histórico do Projeto
 
-> **Última atualização**: 17/01/2026  
+> **Última atualização**: 29/01/2026
 > **Objetivo**: Documentar o que funciona, problemas conhecidos, e pendências
 
 ---
@@ -18,6 +18,7 @@
 | Bull Queue | ✅ Funciona | Jobs processados corretamente |
 | API REST | ✅ Funciona | Endpoints operacionais |
 | Firefox como browser | ✅ Funciona | **Preferido sobre Chromium** |
+| **Modo público (sem login)** | ✅ Novo 29/01 | Extrai comentários sem conta (estilo Apify) |
 
 ### Database (Supabase)
 | Tabela | Status |
@@ -98,9 +99,74 @@ DAILY_LIMITS = {
 
 ---
 
+## 🆕 Modo Público (Sem Login) - Implementado 29/01/2026
+
+### Descrição
+Novo modo de extração similar ao Apify Instagram Comment Scraper que não requer login.
+
+### Como Usar
+
+```bash
+# Modo automático (padrão): tenta público primeiro, depois autenticado
+curl -X POST http://localhost:3000/api/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"postUrl": "https://instagram.com/p/ABC123/"}'
+
+# Modo público forçado: nunca usa login
+curl -X POST http://localhost:3000/api/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"postUrl": "https://instagram.com/p/ABC123/", "mode": "public"}'
+
+# Modo autenticado forçado: sempre usa login
+curl -X POST http://localhost:3000/api/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"postUrl": "https://instagram.com/p/ABC123/", "mode": "authenticated"}'
+```
+
+### Modos Disponíveis
+
+| Modo | Descrição | Risco de Ban |
+|------|-----------|--------------|
+| `auto` | Tenta público primeiro, cai para autenticado se necessário | Baixo |
+| `public` | Apenas extração pública, sem login | Zero |
+| `authenticated` | Sempre usa conta para login | Médio |
+
+### Benefícios do Modo Público
+- Zero risco de ban de contas
+- Funciona mesmo sem contas cadastradas
+- Mais rápido (sem overhead de login)
+- Ideal para posts públicos
+
+### Limitações do Modo Público
+- Extrai apenas comentários visíveis a usuários não autenticados
+- Alguns posts podem exigir autenticação
+- Pode retornar menos comentários que modo autenticado
+
+---
+
+## 🔧 Melhorias Implementadas 29/01/2026
+
+### 1. Diagnóstico de Contas
+- Logs detalhados quando nenhuma conta está disponível
+- Instruções SQL para verificar/resetar contas no Supabase
+- Arquivo: `accountPool.service.js`
+
+### 2. Parâmetro `mode` na API
+- API aceita `mode: "public" | "authenticated" | "auto"`
+- Worker passa mode para o serviço de scraping
+- Arquivos: `server.js`, `scraper.worker.js`
+
+### 3. Método `scrapePublicComments()`
+- Nova função para extração sem login
+- Usa mesmas técnicas de stealth e interception
+- Arquivo: `instagram.service.js`
+
+---
+
 ## 📝 Pendências
 
-- [ ] Resolver login 2FA
+- [ ] Resolver login 2FA (código TOTP não submete)
 - [ ] Testar sistema de warming
 - [ ] Validar stealth com Firefox
 - [ ] Testar CRON automático
+- [x] Implementar modo público (Apify-style) - **Concluído 29/01**

@@ -82,9 +82,12 @@ class InstagramService {
      * Main method to scrape comments from an Instagram post
      * @param {string} postUrl - Instagram post URL
      * @param {Object} proxy - Optional proxy configuration
+     * @param {string} jobId - Optional job ID for tracking
+     * @param {number} maxComments - Optional max comments to extract
+     * @param {string} mode - Scraping mode: 'public' | 'authenticated' | 'auto' (default: 'auto')
      * @returns {Promise<Object>} Scraping result
      */
-    async scrapeComments(postUrl, proxy = null, jobId = null, maxComments = null) {
+    async scrapeComments(postUrl, proxy = null, jobId = null, maxComments = null, mode = 'auto') {
         const postId = extractPostId(postUrl);
         if (!postId) {
             throw new Error('Invalid Instagram post URL');
@@ -93,7 +96,49 @@ class InstagramService {
         // Ensure services are initialized (loads from database)
         await initializeServices();
 
-        logger.info('[SCRAPE] Starting comment scrape', { postId, postUrl });
+        logger.info('[SCRAPE] Starting comment scrape', { postId, postUrl, mode });
+
+        // Handle different modes
+        if (mode === 'public') {
+            // Public-only mode: never try authenticated
+            return await this.scrapePublicComments(postUrl, proxy, maxComments);
+        }
+
+        if (mode === 'auto') {
+            // Auto mode: try public first, fall back to authenticated
+            const accountCount = accountPool.getAccountCount();
+
+            // If no accounts available, use public mode
+            if (accountCount === 0) {
+                logger.info('[SCRAPE] No accounts available, using public mode...');
+                try {
+                    const publicResult = await this.scrapePublicComments(postUrl, proxy, maxComments);
+                    if (publicResult.commentsCount > 0) {
+                        return publicResult;
+                    }
+                    logger.info('[SCRAPE] Public mode found 0 comments, no fallback available');
+                    return publicResult;
+                } catch (publicError) {
+                    logger.error('[SCRAPE] Public mode failed:', publicError.message);
+                    throw new Error('No accounts available and public extraction failed: ' + publicError.message);
+                }
+            }
+
+            // Try public mode first (faster, no account ban risk)
+            logger.info('[SCRAPE] Auto mode: trying public extraction first...');
+            try {
+                const publicResult = await this.scrapePublicComments(postUrl, proxy, maxComments);
+                if (publicResult.commentsCount >= 5) {
+                    logger.info(`[SCRAPE] Public mode succeeded with ${publicResult.commentsCount} comments`);
+                    return publicResult;
+                }
+                logger.info(`[SCRAPE] Public mode found only ${publicResult.commentsCount} comments, trying authenticated...`);
+            } catch (publicError) {
+                logger.info('[SCRAPE] Public mode failed, trying authenticated:', publicError.message);
+            }
+        }
+
+        // Authenticated mode (mode === 'authenticated' or auto fallback)
 
         let browser = null;
         let context = null;
@@ -344,9 +389,188 @@ class InstagramService {
     }
 
     /**
+     * Scrape comments without login (public mode)
+     * Extracts only comments visible to non-authenticated users
+     * Similar to Apify's "No Login" Instagram Comment Scraper approach
+     *
+     * @param {string} postUrl - Instagram post URL
+     * @param {Object} proxy - Optional proxy configuration
+     * @param {number} maxComments - Optional max comments to extract
+     * @returns {Promise<Object>} Scraping result
+     */
+    async scrapePublicComments(postUrl, proxy = null, maxComments = null) {
+        const postId = extractPostId(postUrl);
+        if (!postId) {
+            throw new Error('Invalid Instagram post URL');
+        }
+
+        logger.info('[PUBLIC SCRAPE] Starting public comment extraction (no login)', { postId, postUrl });
+
+        let browser = null;
+        let context = null;
+        const comments = [];
+
+        try {
+            // Launch browser without login
+            browser = await this.launchBrowser(proxy);
+            context = await this.createBrowserContext(browser);
+
+            // Reset comment extractor for this session
+            commentExtractor.reset();
+
+            // Create page and setup interception BEFORE navigation
+            const page = await context.newPage();
+            this.setupInterception(page, comments, postId, postUrl);
+
+            logger.info('[PUBLIC SCRAPE] Navigating to post...');
+
+            // Navigate directly to the post
+            await page.goto(postUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000
+            });
+
+            // Wait for the page to stabilize
+            await randomDelay(2000, 3000);
+
+            // Check if we hit a login wall
+            const isLoginRequired = await page.evaluate(() => {
+                const loginSelectors = [
+                    'input[name="username"]',
+                    '[data-testid="login-button"]',
+                    'button:has-text("Log In")',
+                    'a[href*="/accounts/login"]'
+                ];
+                return loginSelectors.some(sel => document.querySelector(sel) !== null);
+            });
+
+            if (isLoginRequired) {
+                logger.warn('[PUBLIC SCRAPE] Login wall detected - post may require authentication');
+                // Continue anyway - some content may still be visible
+            }
+
+            // Extract post metadata if available
+            let postMetadata = { post_author: null, post_description: null, post_likes_count: null };
+            try {
+                postMetadata = await this.extractPostMetadata(page);
+            } catch (e) {
+                logger.debug('[PUBLIC SCRAPE] Could not extract post metadata');
+            }
+
+            // Reset page position
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await randomDelay(500, 800);
+
+            // Wait for comments section to appear
+            try {
+                await this.waitForComments(page);
+            } catch (e) {
+                logger.debug('[PUBLIC SCRAPE] Comments section not found initially');
+            }
+
+            // Try to expand comments if "View all X comments" button exists
+            try {
+                const expanded = await this.expandAllComments(page);
+                if (expanded) {
+                    logger.info('[PUBLIC SCRAPE] Expanded comments, waiting for data...');
+                    await this.waitForInitialGraphQLResponse(page, comments, 30000);
+                }
+            } catch (e) {
+                logger.debug('[PUBLIC SCRAPE] Could not expand comments:', e.message);
+            }
+
+            // Scroll to trigger more comments loading
+            logger.info('[PUBLIC SCRAPE] Scrolling to load more comments...');
+            await this.scrollForMoreComments(page, maxComments || 100, comments);
+
+            // DOM extraction fallback
+            if (comments.length < 10) {
+                logger.info('[PUBLIC SCRAPE] Trying DOM extraction...');
+
+                // First, aggressively scroll the modal/page
+                await this.scrollModalToLoadAllComments(page);
+
+                const visibleComments = await this.extractVisibleCommentsFromDOM(page, postId, postUrl);
+                if (visibleComments.length > 0) {
+                    logger.info(`[PUBLIC SCRAPE] DOM extraction found ${visibleComments.length} comments`);
+
+                    const existingTexts = new Set(comments.map(c => c.text?.substring(0, 40)));
+                    for (const domComment of visibleComments) {
+                        const textKey = domComment.text?.substring(0, 40);
+                        if (textKey && !existingTexts.has(textKey)) {
+                            comments.push(domComment);
+                            existingTexts.add(textKey);
+                        }
+                    }
+                }
+            }
+
+            // Script tag extraction fallback
+            if (comments.length === 0) {
+                logger.info('[PUBLIC SCRAPE] Trying script tag extraction...');
+                const scriptComments = await this.extractCommentsFromScripts(page, postId, postUrl);
+                comments.push(...scriptComments);
+            }
+
+            // sharedData fallback
+            if (comments.length < 5) {
+                const sharedDataComments = await this.extractSharedData(page, postId, postUrl);
+                if (sharedDataComments.length > 0) {
+                    logger.info(`[PUBLIC SCRAPE] _sharedData found ${sharedDataComments.length} comments`);
+                    const existingTexts = new Set(comments.map(c => c.text?.substring(0, 40)));
+                    for (const sdComment of sharedDataComments) {
+                        const textKey = sdComment.text?.substring(0, 40);
+                        if (textKey && !existingTexts.has(textKey)) {
+                            comments.push(sdComment);
+                        }
+                    }
+                }
+            }
+
+            // Save comments to database
+            const savedCount = await this.saveComments(comments, postId);
+
+            logger.info('[PUBLIC SCRAPE] Completed', {
+                postId,
+                commentsFound: comments.length,
+                commentsSaved: savedCount,
+                mode: 'public'
+            });
+
+            return {
+                success: true,
+                mode: 'public',
+                postId,
+                postUrl,
+                commentsCount: comments.length,
+                savedCount,
+                account: null, // No account used
+                post_author: postMetadata.post_author,
+                post_description: postMetadata.post_description,
+                post_likes_count: postMetadata.post_likes_count,
+            };
+
+        } catch (error) {
+            logger.error('[PUBLIC SCRAPE] Error:', {
+                postUrl,
+                error: error.message
+            });
+            throw error;
+
+        } finally {
+            if (context) {
+                try { await context.close(); } catch (e) { /* ignore */ }
+            }
+            if (browser) {
+                try { await browser.close(); } catch (e) { /* ignore */ }
+            }
+        }
+    }
+
+    /**
      * Ensure user is logged in, either by loading session or performing login
-     * @param {BrowserContext} context 
-     * @param {Object} account 
+     * @param {BrowserContext} context
+     * @param {Object} account
      * @returns {Promise<boolean>}
      */
     async ensureLoggedIn(context, account) {
