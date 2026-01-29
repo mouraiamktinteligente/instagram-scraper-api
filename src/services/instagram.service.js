@@ -128,11 +128,17 @@ class InstagramService {
             logger.info('[SCRAPE] Auto mode: trying public extraction first...');
             try {
                 const publicResult = await this.scrapePublicComments(postUrl, proxy, maxComments);
-                if (publicResult.commentsCount >= 5) {
+
+                // Force authenticated mode if login wall was detected (GraphQL won't work without auth)
+                if (publicResult.loginWallDetected) {
+                    logger.info('[SCRAPE] Login wall detected - forcing authenticated mode for complete data');
+                    // Don't return, continue to authenticated mode below
+                } else if (publicResult.commentsCount >= 5) {
                     logger.info(`[SCRAPE] Public mode succeeded with ${publicResult.commentsCount} comments`);
                     return publicResult;
+                } else {
+                    logger.info(`[SCRAPE] Public mode found only ${publicResult.commentsCount} comments, trying authenticated...`);
                 }
-                logger.info(`[SCRAPE] Public mode found only ${publicResult.commentsCount} comments, trying authenticated...`);
             } catch (publicError) {
                 logger.info('[SCRAPE] Public mode failed, trying authenticated:', publicError.message);
             }
@@ -213,7 +219,7 @@ class InstagramService {
             if (expanded) {
                 // ⭐ CRITICAL: Wait for GraphQL API to respond BEFORE scrolling
                 logger.info('[SCRAPE] ⏳ Waiting for initial GraphQL response...');
-                const initialCount = await this.waitForInitialGraphQLResponse(page, comments, 60000);
+                const initialCount = await this.waitForInitialGraphQLResponse(page, comments, 30000);
                 logger.info(`[SCRAPE] ✅ Initial GraphQL loaded: ${initialCount} comments`);
             }
 
@@ -409,6 +415,7 @@ class InstagramService {
         let browser = null;
         let context = null;
         const comments = [];
+        let loginWallDetected = false;
 
         try {
             // Launch browser without login
@@ -452,6 +459,7 @@ class InstagramService {
 
             if (isLoginRequired) {
                 logger.warn('[PUBLIC SCRAPE] Login wall detected - post may require authentication');
+                loginWallDetected = true;
                 // Continue anyway - some content may still be visible
             }
 
@@ -550,6 +558,7 @@ class InstagramService {
                 postUrl,
                 commentsCount: comments.length,
                 savedCount,
+                loginWallDetected,
                 account: null, // No account used
                 post_author: postMetadata.post_author,
                 post_description: postMetadata.post_description,
@@ -1893,6 +1902,10 @@ class InstagramService {
 
             if (!isApiCall) return;
 
+            // Early exit for URLs that never contain comments
+            const bannedPatterns = ['ads', 'metrics', 'insights', 'profile_pic', 'image/', 'video/', 'story/', 'reel/', 'music', 'audio', 'logging', 'pixel'];
+            if (bannedPatterns.some(p => url.includes(p))) return;
+
             try {
                 const ct = (response.headers()['content-type'] || '').toLowerCase();
                 if (!ct.includes('json') && !url.includes('graphql')) return;
@@ -2953,7 +2966,7 @@ class InstagramService {
      * @param {number} timeoutMs - Maximum wait time (default: 60s)
      * @returns {Promise<number>} - Number of comments loaded
      */
-    async waitForInitialGraphQLResponse(page, commentsArray, timeoutMs = 60000) {
+    async waitForInitialGraphQLResponse(page, commentsArray, timeoutMs = 30000) {
         const startTime = Date.now();
         let lastCount = 0;
         let stableCount = 0;
@@ -3107,8 +3120,8 @@ class InstagramService {
      */
     async scrollForMoreComments(page, maxComments = null, commentsArray = []) {
         const MAX_SCROLLS = 25;
-        const MAX_NO_CHANGE = 7;
-        const SCROLL_DELAY = 4500;
+        const MAX_NO_CHANGE = 4;     // Reduced from 7 - exit earlier when no change
+        const SCROLL_DELAY = 3000;   // Reduced from 4500ms
 
         let totalClicks = 0;
         let previousGraphQLCount = commentsArray.length;
@@ -4444,6 +4457,15 @@ class InstagramService {
                     uniqueComments.push(cleanComment);
                 }
             }
+
+            // Sort by date (newest first) before saving
+            uniqueComments.sort((a, b) => {
+                const dateA = new Date(a.created_at).getTime();
+                const dateB = new Date(b.created_at).getTime();
+                return dateB - dateA;  // DESC - newest first
+            });
+
+            logger.info(`[SAVE] Saving ${uniqueComments.length} comments (sorted by date, newest first)`);
 
             // Upsert to Supabase (insert or update on conflict)
             const { data, error } = await supabase
