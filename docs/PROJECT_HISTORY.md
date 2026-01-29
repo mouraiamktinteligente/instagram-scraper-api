@@ -27,9 +27,6 @@
 | `instagram_comments` | ✅ Existe |
 | `instagram_accounts` | ✅ Existe |
 | `instagram_proxies` | ✅ Existe |
-| `warming_accounts` | ✅ Criado 17/01 |
-| `warming_sessions` | ✅ Criado 17/01 |
-| `warming_proxies` | ✅ Criado 17/01 |
 
 ---
 
@@ -61,21 +58,6 @@
 
 ---
 
-## 🆕 Sistema de Warming (Não Testado)
-
-Implementado em 17/01/2026.
-
-| Componente | Arquivo | Status |
-|------------|---------|--------|
-| Padrões de navegação | `warmingBehavior.service.js` | 🟡 Não testado |
-| Pool de warming | `warmingPool.service.js` | 🟡 Não testado |
-| Worker | `warmingWorker.js` | 🟡 Não testado |
-| CRON | `warming.cron.js` | 🟡 Não testado |
-| Stealth browser | `stealthBrowser.js` | 🟡 Não testado |
-| Comportamento humano | `humanBehavior.js` | 🟡 Não testado |
-
----
-
 ## 📋 Configuração Técnica
 
 ### Browser
@@ -83,19 +65,8 @@ Implementado em 17/01/2026.
 - **Problema**: Chromium não funciona com login Instagram
 - **Stealth**: Aplicado via `addInitScript` (não via plugin)
 
-### Limites de Ação (Warming)
-```javascript
-DAILY_LIMITS = {
-  likes: 80,
-  follows: 40,
-  comments: 15,
-  stories: 100
-}
-```
-
 ### Timezone
 - **Horário**: Brasília (UTC-3)
-- **Warming**: 08:00-23:00
 
 ---
 
@@ -161,12 +132,16 @@ curl -X POST http://localhost:3000/api/scrape \
 - Usa mesmas técnicas de stealth e interception
 - Arquivo: `instagram.service.js`
 
+### 4. Remoção do Sistema de Warming
+- Removidos 5 arquivos (~2,715 linhas de código)
+- Sistema não funcionou como esperado
+- Funcionalidades de scraping mantidas intactas
+
 ---
 
 ## 📝 Pendências
 
 - [ ] Resolver login 2FA (código TOTP não submete)
-- [ ] Testar sistema de warming
 - [ ] Validar stealth com Firefox
-- [ ] Testar CRON automático
 - [x] Implementar modo público (Apify-style) - **Concluído 29/01**
+- [x] Remover sistema de warming - **Concluído 29/01**
