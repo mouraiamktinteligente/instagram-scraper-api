@@ -1118,6 +1118,128 @@ If you cannot find any comments, return:
             coverage: totalExpected > 0 ? Math.round((allComments.length / totalExpected) * 100) : 100
         };
     }
+
+    // ========================================
+    // Self-Healing System Methods
+    // ========================================
+
+    /**
+     * Force rediscovery of a selector (used by self-healing system)
+     * Clears cache and triggers fresh AI discovery on next use
+     * @param {string} name - Selector name
+     * @param {string} context - Page context
+     */
+    async forceRediscovery(name, context) {
+        const key = `${context}:${name}`;
+        logger.info(`[AI-FALLBACK] Force rediscovery triggered for: ${key}`);
+
+        // Clear from memory cache
+        this.selectorCache.delete(key);
+
+        // Mark as needing rediscovery in database (set low confidence)
+        try {
+            await this.supabase
+                .from('selector_registry')
+                .update({
+                    confidence_score: 0.1,
+                    needs_rediscovery: true,
+                    last_failure_at: new Date().toISOString()
+                })
+                .eq('selector_name', name)
+                .eq('selector_context', context);
+
+            logger.info(`[AI-FALLBACK] Marked ${key} for rediscovery`);
+        } catch (e) {
+            logger.debug('[AI-FALLBACK] Could not mark for rediscovery:', e.message);
+        }
+    }
+
+    /**
+     * Invalidate all selectors for a specific page context
+     * Used when page structure change is detected
+     * @param {string} context - Page context to invalidate
+     */
+    async invalidateContext(context) {
+        logger.warn(`[AI-FALLBACK] Invalidating all selectors for context: ${context}`);
+
+        // Clear from memory cache
+        for (const key of this.selectorCache.keys()) {
+            if (key.startsWith(`${context}:`)) {
+                this.selectorCache.delete(key);
+            }
+        }
+
+        // Mark all in database as needing rediscovery
+        try {
+            await this.supabase
+                .from('selector_registry')
+                .update({
+                    confidence_score: 0.1,
+                    needs_rediscovery: true,
+                    invalidated_at: new Date().toISOString()
+                })
+                .eq('selector_context', context);
+
+            logger.info(`[AI-FALLBACK] Invalidated all selectors for ${context}`);
+        } catch (e) {
+            logger.debug('[AI-FALLBACK] Could not invalidate context:', e.message);
+        }
+    }
+
+    /**
+     * Clear cache for a specific selector or all selectors
+     * @param {string|null} name - Selector name (null for all)
+     * @param {string|null} context - Page context (null for all)
+     */
+    clearCache(name = null, context = null) {
+        if (name && context) {
+            const key = `${context}:${name}`;
+            this.selectorCache.delete(key);
+            logger.debug(`[AI-FALLBACK] Cleared cache for: ${key}`);
+        } else if (context) {
+            for (const key of this.selectorCache.keys()) {
+                if (key.startsWith(`${context}:`)) {
+                    this.selectorCache.delete(key);
+                }
+            }
+            logger.debug(`[AI-FALLBACK] Cleared cache for context: ${context}`);
+        } else {
+            this.selectorCache.clear();
+            logger.debug('[AI-FALLBACK] Cleared all cache');
+        }
+    }
+
+    /**
+     * Get all selectors that need rediscovery
+     * @returns {Promise<Array>} Selectors needing rediscovery
+     */
+    async getSelectorsNeedingRediscovery() {
+        try {
+            const { data, error } = await this.supabase
+                .from('selector_registry')
+                .select('*')
+                .eq('needs_rediscovery', true)
+                .order('last_failure_at', { ascending: false });
+
+            if (error) throw error;
+            return data || [];
+        } catch (e) {
+            logger.error('[AI-FALLBACK] Error getting selectors needing rediscovery:', e.message);
+            return [];
+        }
+    }
+
+    /**
+     * Get selector statistics for monitoring
+     * @returns {Object} Statistics
+     */
+    getStats() {
+        return {
+            cacheSize: this.selectorCache.size,
+            cachedSelectors: Array.from(this.selectorCache.keys()),
+            initialized: this.initialized
+        };
+    }
 }
 
 // Export singleton instance

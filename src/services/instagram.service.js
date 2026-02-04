@@ -20,6 +20,11 @@ const {
 } = require('../utils/helpers');
 const stealthService = require('./browser/stealth');
 
+// Self-healing system services
+const selectorHealth = require('./selectorHealth.service');
+const changeDetector = require('./changeDetector.service');
+const autoRecovery = require('./autoRecovery.service');
+
 // Initialize Supabase client
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
@@ -2542,6 +2547,19 @@ class InstagramService {
         // Wait for network to settle
         await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
 
+        // SELF-HEALING: Detect page structure changes
+        try {
+            const changeResult = await changeDetector.preflightCheck(page, 'post_page');
+            if (changeResult.changed) {
+                logger.warn('[SELF-HEALING] Instagram post page structure changed! Selectors may need update.');
+                logger.warn('[SELF-HEALING] Change details:', JSON.stringify(changeResult.diff, null, 2));
+            } else if (changeResult.isNew) {
+                logger.info('[SELF-HEALING] Captured initial page fingerprint for post_page');
+            }
+        } catch (changeError) {
+            logger.debug('[SELF-HEALING] Change detection skipped:', changeError.message);
+        }
+
         // LAYOUT DETECTION: Check which layout Instagram served
         const layoutInfo = await this.detectLayoutType(page);
         logger.info('[LAYOUT] Detected layout:', layoutInfo);
@@ -3120,11 +3138,15 @@ class InstagramService {
 
     /**
      * Intelligently find and click "View all X comments" button
+     * Integrated with self-healing system for automatic recovery
      * @param {Page} page
      * @returns {Promise<boolean>} Whether comments were expanded
      */
     async expandAllComments(page) {
-        logger.info('[SCRAPE] 🔍 Attempting to expand comments (Advanced Strategy)...');
+        logger.info('[SCRAPE] 🔍 Attempting to expand comments (Advanced Strategy with Self-Healing)...');
+
+        const selectorName = 'view_more_comments';
+        const context = 'post_page';
 
         try {
             // Strategy 0: High-confidence "View all comments" link/button
@@ -3142,6 +3164,8 @@ class InstagramService {
                     if (el && await el.isVisible()) {
                         logger.info(`[SCRAPE] ✅ Strategy 0: Found primary button with: ${selector}`);
                         if (await this.robustClick(page, el, 'Primary Expand Button')) {
+                            // Record success in health monitor
+                            selectorHealth.recordAttempt(selectorName, context, true, selector);
                             return true;
                         }
                     }
@@ -3167,28 +3191,55 @@ class InstagramService {
 
             if (structuralSuccess) {
                 logger.info('[SCRAPE] ✅ Strategy 1: Triggered expansion via structural pattern');
+                selectorHealth.recordAttempt(selectorName, context, true, 'structural_pattern');
                 await page.waitForTimeout(2000);
                 return true;
             }
 
             // Strategy 2: AI discovery (Fallback)
             logger.info('[SCRAPE] 🤖 Normal search failed, requesting AI assistance...');
-            const aiDiscovery = await aiSelectorFallback.findElement(page, 'view_more_comments', 'post_page');
+            const aiDiscovery = await aiSelectorFallback.findElement(page, selectorName, context);
 
             if (aiDiscovery.element) {
                 logger.info(`[SCRAPE] ✅ Strategy 2: AI discovered expand button: ${aiDiscovery.usedSelector}`);
                 const clickedByAI = await this.robustClick(page, aiDiscovery.element, 'AI discovered button');
                 if (clickedByAI) {
+                    selectorHealth.recordAttempt(selectorName, context, true, aiDiscovery.usedSelector);
                     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
                     return true;
                 }
             }
 
-            logger.warn('[SCRAPE] ⚠️ All expansion strategies failed');
+            // Strategy 3: Auto-Recovery with Vision Analysis (Self-Healing)
+            logger.info('[SCRAPE] 🔧 Attempting self-healing auto-recovery...');
+            try {
+                // Capture screenshot for vision analysis
+                const screenshotPath = `/tmp/recovery_expand_${Date.now()}.png`;
+                await page.screenshot({ path: screenshotPath, fullPage: false });
+
+                const recovered = await autoRecovery.recover(selectorName, context, page, screenshotPath);
+
+                if (recovered?.element) {
+                    logger.info(`[SCRAPE] ✅ Strategy 3: Auto-recovery succeeded: ${recovered.usedSelector}`);
+                    const clickedRecovered = await this.robustClick(page, recovered.element, 'Auto-recovered button');
+                    if (clickedRecovered) {
+                        selectorHealth.recordAttempt(selectorName, context, true, recovered.usedSelector);
+                        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+                        return true;
+                    }
+                }
+            } catch (recoveryError) {
+                logger.warn('[SCRAPE] Auto-recovery failed:', recoveryError.message);
+            }
+
+            // All strategies failed - record failure
+            logger.warn('[SCRAPE] ⚠️ All expansion strategies failed (including self-healing)');
+            selectorHealth.recordAttempt(selectorName, context, false, null);
             return false;
 
         } catch (error) {
             logger.error('[SCRAPE] Error in expandAllComments:', error.message);
+            selectorHealth.recordAttempt(selectorName, context, false, null);
             return false;
         }
     }
