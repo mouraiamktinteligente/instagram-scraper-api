@@ -145,52 +145,43 @@ class InstagramService {
         }
 
         // Authenticated mode (mode === 'authenticated' or auto fallback)
+        // ⭐ FALLBACK SYSTEM: Try all accounts for BOTH login AND scrape
+        // If scrape fails with one account, automatically try the next
 
-        let browser = null;
-        let context = null;
-        let account = null;
-        const comments = [];
-
-        // Try all available accounts before giving up
         const maxAccountAttempts = accountPool.getAccountCount();
-        let loggedIn = false;
+        let lastError = null;
 
-        for (let attempt = 0; attempt < maxAccountAttempts; attempt++) {
-            account = accountPool.getNextAccount();
-            if (!account) break;
-
-            logger.info(`[SCRAPE] Trying account: ${account.username} (${attempt + 1}/${maxAccountAttempts})`);
+        for (let accountAttempt = 0; accountAttempt < maxAccountAttempts; accountAttempt++) {
+            let browser = null;
+            let context = null;
+            let account = null;
+            const comments = [];
 
             try {
-                browser = await this.launchBrowser(proxy);
-                context = await this.createBrowserContext(browser);
-                loggedIn = await this.ensureLoggedIn(context, account);
-
-                if (loggedIn) {
-                    logger.info(`[SCRAPE] Using account: ${account.username}`);
+                // Get next available account
+                account = accountPool.getNextAccount();
+                if (!account) {
+                    logger.warn('[SCRAPE] No more accounts available');
                     break;
                 }
 
-                logger.warn(`[SCRAPE] Account ${account.username} login failed, trying next...`);
-                accountPool.reportError(account.username, 'Login failed - possible 2FA challenge issue');
-            } catch (loginError) {
-                logger.warn(`[SCRAPE] Account ${account.username} error: ${loginError.message}, trying next...`);
-                accountPool.reportError(account.username, loginError.message);
-            }
+                logger.info(`[SCRAPE] 🔄 Trying account: ${account.username} (${accountAttempt + 1}/${maxAccountAttempts})`);
 
-            // Cleanup before trying next account
-            if (context) try { await context.close(); } catch (e) { /* ignore */ }
-            if (browser) try { await browser.close(); } catch (e) { /* ignore */ }
-            browser = null;
-            context = null;
-        }
+                // Step 1: Login
+                browser = await this.launchBrowser(proxy);
+                context = await this.createBrowserContext(browser);
+                const loggedIn = await this.ensureLoggedIn(context, account);
 
-        if (!loggedIn || !account) {
-            throw new Error('All Instagram accounts failed to login');
-        }
+                if (!loggedIn) {
+                    logger.warn(`[SCRAPE] Account ${account.username} login failed, trying next account...`);
+                    accountPool.reportError(account.username, 'Login failed - possible 2FA challenge issue');
+                    continue; // Try next account
+                }
 
-        try {
-            // Reset comment extractor for this session (clear hashes)
+                logger.info(`[SCRAPE] ✅ Logged in with account: ${account.username}`);
+
+                // Step 2: Scrape (entire process wrapped in this try block)
+                // Reset comment extractor for this session (clear hashes)
             commentExtractor.reset();
 
             // Create page and setup interception
@@ -376,22 +367,31 @@ class InstagramService {
                 post_likes_count: postMetadata.post_likes_count,
             };
 
-        } catch (error) {
-            logger.error('Error scraping comments:', {
-                postUrl,
-                error: error.message,
-                stack: error.stack
-            });
-            throw error;
+            } catch (scrapeError) {
+                // ⭐ FALLBACK: Save error and try next account
+                lastError = scrapeError;
+                logger.warn(`[SCRAPE] ⚠️ Account ${account?.username} failed: ${scrapeError.message}`);
 
-        } finally {
-            if (context) {
-                try { await context.close(); } catch (e) { /* ignore */ }
-            }
-            if (browser) {
-                try { await browser.close(); } catch (e) { /* ignore */ }
+                if (account) {
+                    accountPool.reportError(account.username, scrapeError.message);
+                }
+
+                // Continue to next account (don't throw yet)
+
+            } finally {
+                // Cleanup browser/context before trying next account
+                if (context) {
+                    try { await context.close(); } catch (e) { /* ignore */ }
+                }
+                if (browser) {
+                    try { await browser.close(); } catch (e) { /* ignore */ }
+                }
             }
         }
+
+        // ⭐ If we get here, ALL accounts failed
+        logger.error('[SCRAPE] ❌ All accounts failed to scrape post', { postUrl, lastError: lastError?.message });
+        throw lastError || new Error('All Instagram accounts failed to scrape');
     }
 
     /**

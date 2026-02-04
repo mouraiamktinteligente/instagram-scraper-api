@@ -173,61 +173,15 @@ class AccountPoolService {
         status.errorCount++;
         status.lastError = error;
 
-        const banIndicators = [
-            'login_required',
-            'checkpoint_required',
-            'This account has been suspended',
-            'challenge_required',
-            'blocked',
-            'rate limit'
-        ];
+        // SIMPLIFIED BAN LOGIC:
+        // Only ban when Instagram has actually suspended the account
+        // This is indicated by "accounts/suspended" in the URL/error
+        // All other errors (2FA, timeout, network, etc.) do NOT ban the account
+        const isReallyBanned = error.toLowerCase().includes('accounts/suspended');
 
-        const hardBanIndicators = [
-            'login_required',
-            'checkpoint_required',
-            'challenge_required',
-            'blocked',
-            'suspended',
-            'incorrect password',
-            'senha incorreta'
-        ];
-
-        const tempErrorIndicators = [
-            'timeout',
-            'proxy',
-            'network',
-            'rate limit',
-            'wait some minutes',
-            'aguarde alguns minutos',
-            // 2FA-related errors are temporary, not permanent bans
-            '2fa',
-            '2FA',
-            'Could not find 2FA',
-            'Login failed',  // Generic login failure (often 2FA related)
-            'TOTP',
-            'verification code',
-            'código de verificação',
-            'code input field',
-            'challenge failed',
-        ];
-
-        const isHardBan = hardBanIndicators.some(indicator =>
-            error.toLowerCase().includes(indicator.toLowerCase())
-        );
-
-        const isTempError = tempErrorIndicators.some(indicator =>
-            error.toLowerCase().includes(indicator.toLowerCase())
-        );
-
-        // Ban logic:
-        // 1. Hard ban detected (permanent or credential issue)
-        // 2. High error count (persistent issues, even if temp)
-        // Increased thresholds to be more tolerant of temporary failures (especially 2FA)
-        const ERROR_THRESHOLD = isTempError ? 10 : 5;
-
-        if (isHardBan || status.errorCount >= ERROR_THRESHOLD) {
+        if (isReallyBanned) {
             status.status = 'banned';
-            logger.warn(`Account ${username} marked as banned/inactive: ${error} (Errors: ${status.errorCount})`);
+            logger.warn(`[ACCOUNT] ⛔ Account ${username} BANNED BY INSTAGRAM: ${error}`);
 
             // Update database
             try {
@@ -242,8 +196,10 @@ class AccountPoolService {
                 logger.debug('Failed to update account ban status in DB:', e.message);
             }
         } else {
-            logger.info(`Reported error for ${username}: ${error}. Fail count: ${status.errorCount}/${ERROR_THRESHOLD}`);
-            // Just update fail count
+            // Log error but DO NOT ban the account
+            logger.info(`[ACCOUNT] Reported error for ${username}: ${error}. Fail count: ${status.errorCount} (account NOT banned)`);
+
+            // Just update fail count in database
             try {
                 await this.supabase
                     .from('instagram_accounts')
