@@ -198,7 +198,17 @@ class AccountPoolService {
             'network',
             'rate limit',
             'wait some minutes',
-            'aguarde alguns minutos'
+            'aguarde alguns minutos',
+            // 2FA-related errors are temporary, not permanent bans
+            '2fa',
+            '2FA',
+            'Could not find 2FA',
+            'Login failed',  // Generic login failure (often 2FA related)
+            'TOTP',
+            'verification code',
+            'código de verificação',
+            'code input field',
+            'challenge failed',
         ];
 
         const isHardBan = hardBanIndicators.some(indicator =>
@@ -209,10 +219,11 @@ class AccountPoolService {
             error.toLowerCase().includes(indicator.toLowerCase())
         );
 
-        // Ban logic: 
+        // Ban logic:
         // 1. Hard ban detected (permanent or credential issue)
         // 2. High error count (persistent issues, even if temp)
-        const ERROR_THRESHOLD = isTempError ? 5 : 3;
+        // Increased thresholds to be more tolerant of temporary failures (especially 2FA)
+        const ERROR_THRESHOLD = isTempError ? 10 : 5;
 
         if (isHardBan || status.errorCount >= ERROR_THRESHOLD) {
             status.status = 'banned';

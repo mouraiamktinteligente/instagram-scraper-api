@@ -172,7 +172,7 @@ class InstagramService {
                 }
 
                 logger.warn(`[SCRAPE] Account ${account.username} login failed, trying next...`);
-                accountPool.reportError(account.username, 'Login failed');
+                accountPool.reportError(account.username, 'Login failed - possible 2FA challenge issue');
             } catch (loginError) {
                 logger.warn(`[SCRAPE] Account ${account.username} error: ${loginError.message}, trying next...`);
                 accountPool.reportError(account.username, loginError.message);
@@ -1366,17 +1366,47 @@ class InstagramService {
 
             // Look for 2FA code input field (various selectors)
             const codeInputSelectors = [
+                // Standard 2FA input names
                 'input[name="verificationCode"]',
                 'input[name="security_code"]',
+                'input[name="code"]',
+                'input[name="otp"]',
+
+                // Aria labels (multilingual)
                 'input[aria-label*="Security code"]',
+                'input[aria-label*="security code"]',
                 'input[aria-label*="código"]',
                 'input[aria-label*="Código"]',
                 'input[aria-label*="Código de segurança"]',
+                'input[aria-label*="verification"]',
+                'input[aria-label*="Verification"]',
+
+                // Placeholders
                 'input[placeholder*="code"]',
+                'input[placeholder*="Code"]',
                 'input[placeholder*="código"]',
+                'input[placeholder*="Código"]',
+
+                // Modern HTML5 attributes (used by Instagram for 2FA)
+                'input[autocomplete="one-time-code"]',
+                'input[inputmode="numeric"]',
+                'input[enterkeyhint="done"]',
+                'input[pattern*="[0-9]"]',
+
+                // Data attributes
+                'input[data-testid*="code"]',
+                'input[data-testid*="2fa"]',
+                'input[data-testid*="verification"]',
+
+                // Type-based selectors
                 'input[type="text"][maxlength="6"]',
+                'input[type="text"][maxlength="8"]',
                 'input[type="number"]',
                 'input[type="tel"]',
+
+                // Form-context selectors
+                'form input[maxlength="6"]',
+                'form input[maxlength="8"]',
             ];
 
             let codeInput = null;
@@ -1394,12 +1424,63 @@ class InstagramService {
                 } catch (e) { /* try next */ }
             }
 
+            // Fallback: try to find any visible input that could be the 2FA field
             if (!codeInput) {
-                logger.error('[2FA] ❌ Could not find 2FA code input field');
-                const inputs = await page.$$eval('input', inputs =>
-                    inputs.map(i => `${i.name || i.type || 'unknown'}[${i.placeholder || ''}]`)
-                );
-                logger.error(`[2FA] Available inputs: ${inputs.join(', ')}`);
+                logger.warn('[2FA] ⚠️ No specific selector matched, trying generic fallback...');
+
+                try {
+                    const allInputs = await page.$$('input:not([type="hidden"]):not([type="password"]):not([type="email"])');
+                    for (const input of allInputs) {
+                        const isVisible = await input.isVisible().catch(() => false);
+                        if (!isVisible) continue;
+
+                        const inputType = await input.getAttribute('type').catch(() => null);
+                        const inputName = await input.getAttribute('name').catch(() => '');
+                        const maxLength = await input.getAttribute('maxlength').catch(() => null);
+
+                        // Look for inputs that look like 2FA code fields
+                        const isLikelyCodeInput =
+                            !inputType || inputType === 'text' || inputType === 'tel' || inputType === 'number' ||
+                            (maxLength && parseInt(maxLength) >= 6 && parseInt(maxLength) <= 8);
+
+                        if (isLikelyCodeInput) {
+                            codeInput = input;
+                            logger.info(`[2FA] ✅ Found input via generic fallback (name: ${inputName || 'none'}, type: ${inputType || 'text'})`);
+                            break;
+                        }
+                    }
+                } catch (fallbackError) {
+                    logger.error(`[2FA] Fallback search failed: ${fallbackError.message}`);
+                }
+            }
+
+            // Final check - if still no input found, log detailed debug info and return false
+            if (!codeInput) {
+                logger.error('[2FA] ❌ Could not find 2FA code input field with any method');
+
+                // Detailed debug information
+                try {
+                    const pageInfo = await page.evaluate(() => ({
+                        url: window.location.href,
+                        title: document.title,
+                        formsCount: document.forms.length,
+                        inputs: Array.from(document.querySelectorAll('input')).map(i => ({
+                            name: i.name || '',
+                            type: i.type || 'text',
+                            placeholder: i.placeholder || '',
+                            ariaLabel: i.getAttribute('aria-label') || '',
+                            maxLength: i.maxLength > 0 ? i.maxLength : null,
+                            autocomplete: i.autocomplete || '',
+                            inputMode: i.inputMode || '',
+                            visible: i.offsetParent !== null,
+                            className: i.className.substring(0, 50)
+                        }))
+                    }));
+                    logger.error('[2FA] Page debug info:', JSON.stringify(pageInfo, null, 2));
+                } catch (debugError) {
+                    logger.error(`[2FA] Could not get debug info: ${debugError.message}`);
+                }
+
                 return false;
             }
 
